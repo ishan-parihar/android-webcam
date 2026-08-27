@@ -9,14 +9,19 @@ if [[ -f "$ROOT/pyproject.toml" ]]; then
   pip install -e "$ROOT" 2>&1 | tail -n 10
 fi
 
-# bin wrappers (fallback if pip entry not on PATH)
+# bin wrappers — pip provides android-webcam & android-webcam-cli; keep them
+# android-webcam-gui is an alias that forces GUI even with CLI flags
 mkdir -p ~/.local/bin
 cat > ~/.local/bin/android-webcam-gui <<'EOS'
 #!/bin/bash
-exec python3 -m android_webcam.app "$@"
+exec android-webcam --gui "$@"
 EOS
 chmod +x ~/.local/bin/android-webcam-gui
-ln -sf ~/.local/bin/android-webcam-gui ~/.local/bin/android-webcam 2>/dev/null || true
+# Ensure pip entry is intact (reinstall if overwritten)
+if ! grep -q "from android_webcam.app import main" ~/.local/bin/android-webcam 2>/dev/null; then
+  echo "→ restoring pip android-webcam entry"
+  pip install --break-system-packages --force-reinstall --no-deps -e "$ROOT" 2>&1 | tail -n 5
+fi
 
 # desktop file
 mkdir -p ~/.local/share/applications

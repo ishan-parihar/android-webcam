@@ -253,7 +253,7 @@ class App(Adw.Application):
 def main():
     import sys
     # CLI passthrough: android-webcam --front --720 etc without GUI
-    if any(a in sys.argv for a in ("--help","-h","--dry-run","--front","--back","--720","--1080","--torch","--with-audio","--no-window")) and "--gui" not in sys.argv:
+    if any(a in sys.argv for a in ("--help","-h","--dry-run","--front","--back","--720","--1080","--torch","--with-audio","--no-window","--with-preview")) and "--gui" not in sys.argv:
         # if any CLI flag, run headless backend.cli instead of GUI — unless --gui forced
         if "--help" in sys.argv or "-h" in sys.argv:
             from .backend import cli as backend_cli
@@ -262,5 +262,11 @@ def main():
             # let backend handle headless; detect GUI request via --gui
             from .backend import cli as backend_cli
             backend_cli(); return 0
+    # strip --gui before GTK parses argv (it's our custom flag)
+    argv = [a for a in sys.argv if a != "--gui"]
     app = App()
-    return app.run(None)
+    return app.run(argv)
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(main())
