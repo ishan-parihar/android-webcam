@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "android-webcam"
+version = "1.0.0"
+description = "Native scrcpy camera → v4l2loopback webcam (GTK GUI) for rooted Android on Omarchy/Hyprland"
+readme = "README.md"
+license = "MIT"
+authors = [{name="ishanp"}]
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["scrcpy", "webcam", "v4l2loopback", "android", "omarchy", "hyprland"]
+classifiers = ["Environment :: X11 Applications", "License :: OSI Approved :: MIT License"]
+
+[project.urls]
+Homepage = "https://github.com/ishanp/android-webcam"
+Repository = "https://github.com/ishanp/android-webcam"
+
+[project.scripts]
+android-webcam = "android_webcam.app:main"
+android-webcam-cli = "android_webcam.backend:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/android_webcam"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/", "assets/", "omarchy-plugin/", "scripts/"]

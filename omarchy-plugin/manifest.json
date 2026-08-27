@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "ishanp.android-webcam",
+  "name": "Android Webcam",
+  "version": "1.0.0",
+  "author": "ishanp",
+  "description": "Native scrcpy camera \u2192 v4l2loopback. Back/front, 720p/1080p, torch, mic (echo warning). Replaces Iriun. Bar icon launches GTK app; panel has quick toggles.",
+  "license": "MIT",
+  "homepage": "https://github.com/ishanp/android-webcam",
+  "repository": "https://github.com/ishanp/android-webcam",
+  "keywords": [
+    "webcam",
+    "scrcpy",
+    "android",
+    "v4l2loopback",
+    "camera",
+    "hyprland"
+  ],
+  "kinds": [
+    "bar-widget",
+    "panel"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Android Webcam",
+    "description": "Native webcam \u2014 shows \u25cf when streaming, click to open GUI",
+    "category": "Hardware",
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}
