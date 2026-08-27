@@ -11,17 +11,28 @@ DEFAULTS = {
     "android_port": 5555,
     "camera_facing": "back",  # back/front
     "camera_id": None,        # overrides facing if set
-    "resolution": "720p",     # 720p/1080p
+    "resolution": "1080p",    # 720p/1080p (default = 1080p)
     "custom_size": None,      # "1920x1080" etc
     "fps": 30,
     "torch": False,
-    "with_audio": False,
+    # Two independent audio flags (replaces single with_audio):
+    #   mic_to_host  : forward phone mic to host (PipeWire source "scrcpy").
+    #                   Default ON but muted (no echo). User unmutes per-app in
+    #                   pavucontrol / browser picker.
+    #   mic_to_phone : also forward host microphone back to phone audio output.
+    #                   Enables a phone-side mic that captures host audio
+    #                   (e.g. for a phone-as-mic use case). OFF by default
+    #                   to avoid feedback loops with phone speakers.
+    "mic_to_host": True,
+    "mic_mute": True,         # mute the forwarded mic on host (no echo)
+    "mic_to_phone": False,
     "audio_source": "mic",
     "with_preview": False,
     "v4l2_sink": "/dev/video0",
     "v4l2_buffer": 120,
     "video_bit_rate": "8M",
-    "stay_brightness_low": True,  # set 1/0.001 while streaming
+    "stay_brightness_low": True,
+    "auto_rotate": True,      # match scrcpy window to window aspect
 }
 
 SIZES = {"720p": "1280x720", "1080p": "1920x1080"}

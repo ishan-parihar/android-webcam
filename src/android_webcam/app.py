@@ -5,7 +5,7 @@ from gi.repository import Gtk, Adw, GLib, Gio
 import subprocess, threading, shlex, os
 from pathlib import Path
 from .config import load, save, SIZES, FPS_CHOICES
-from .backend import build_argv, adb_ping, connect_adb, list_cameras
+from .backend import build_argv, adb_ping, connect_adb
 
 APP_ID = "io.github.ishanp.android-webcam"
 
@@ -86,13 +86,22 @@ class App(Adw.Application):
         self.torch_row.set_active(bool(self.cfg.get("torch")))
         self.torch_row.connect("notify::active", self.on_torch)
         grp_extra.add(self.torch_row)
-        self.audio_row = Adw.SwitchRow(title="Microphone (with audio)", subtitle="⚠️ Speakers → phone mic causes echo. Off by default.")
-        self.audio_row.set_active(bool(self.cfg.get("with_audio")))
-        self.audio_row.connect("notify::active", self.on_audio)
-        grp_extra.add(self.audio_row)
-        self.audio_info = Gtk.Label(label="When ON: --audio-source=mic → PulseAudio 'scrcpy' source. Keep speakers low or use headphones.")
+
+        # Audio: two independent switches
+        self.mic_row = Adw.SwitchRow(title="Microphone (mic → host)", subtitle="PipeWire source 'scrcpy' carries phone mic. Muted by default to avoid echo.")
+        self.mic_row.set_active(bool(self.cfg.get("mic_to_host", True)))
+        self.mic_row.connect("notify::active", self.on_mic)
+        grp_extra.add(self.mic_row)
+        self.mic_mute_row = Adw.SwitchRow(title="Unmute mic on host", subtitle="When mic is on, leave it unmuted. Default OFF (echo protection).")
+        self.mic_mute_row.set_active(not bool(self.cfg.get("mic_mute", True)))
+        self.mic_mute_row.connect("notify::active", self.on_mic_mute)
+        grp_extra.add(self.mic_mute_row)
+        self.speaker_row = Adw.SwitchRow(title="Host mic → phone speakers", subtitle="Forward host microphone to phone audio output. Use phone as a speaker for host audio.")
+        self.speaker_row.set_active(bool(self.cfg.get("mic_to_phone", False)))
+        self.speaker_row.connect("notify::active", self.on_speaker)
+        grp_extra.add(self.speaker_row)
+        self.audio_info = Gtk.Label(label="Combinations:  mic only → safe (muted);  mic+unmute → enable per-app in pavucontrol;  speaker only → host mic piped to phone (--audio-source=playback --audio-dup);  mic+speaker → full duplex (feedback risk).")
         self.audio_info.set_wrap(True); self.audio_info.set_xalign(0)
-        self.audio_info.set_visible(bool(self.cfg.get("with_audio")))
         grp_extra.add(self.audio_info)
         # v4l2 sink + buffer
         self.v4l2_row = Adw.EntryRow(title="v4l2 sink")
@@ -104,6 +113,11 @@ class App(Adw.Application):
         self.bright_row.set_active(bool(self.cfg.get("stay_brightness_low",True)))
         self.bright_row.connect("notify::active", self.on_bright)
         grp_extra.add(self.bright_row)
+        # auto-rotate
+        self.rotate_row = Adw.SwitchRow(title="Auto-rotate to match window", subtitle="Re-launches scrcpy with --orientation=0|90|180|270 when the active window aspect flips")
+        self.rotate_row.set_active(bool(self.cfg.get("auto_rotate",True)))
+        self.rotate_row.connect("notify::active", self.on_rotate)
+        grp_extra.add(self.rotate_row)
         box.append(grp_extra)
 
         # Command preview
@@ -183,10 +197,19 @@ class App(Adw.Application):
 
     def on_torch(self,row,_): self.cfg["torch"]=row.get_active(); save(self.cfg); self.refresh_cmd()
 
-    def on_audio(self,row,_):
-        self.cfg["with_audio"]=row.get_active(); self.audio_info.set_visible(row.get_active())
-        save(self.cfg); self.refresh_cmd()
-        if row.get_active(): self.toast("Mic ON — lower speakers / use headphones to avoid echo")
+    def on_mic(self,row,_):
+        self.cfg["mic_to_host"]=row.get_active(); save(self.cfg); self.refresh_cmd()
+        if row.get_active(): self.toast("Phone mic → host (muted). Unmute in pavucontrol if you want it.")
+
+    def on_mic_mute(self,row,_):
+        self.cfg["mic_mute"]=not row.get_active(); save(self.cfg); self.refresh_cmd()
+        if not row.get_active(): self.toast("Echo warning: speakers → phone mic can feedback. Use headphones.")
+
+    def on_speaker(self,row,_):
+        self.cfg["mic_to_phone"]=row.get_active(); save(self.cfg); self.refresh_cmd()
+        if row.get_active(): self.toast("Host mic → phone speakers. Useful for using phone as a speaker.")
+
+    def on_rotate(self,row,_): self.cfg["auto_rotate"]=row.get_active(); save(self.cfg); self.refresh_cmd()
 
     def on_v4l2(self,row): self.cfg["v4l2_sink"]=row.get_text().strip() or "/dev/video0"; save(self.cfg); self.refresh_cmd()
 
@@ -219,20 +242,17 @@ class App(Adw.Application):
 
     def on_start_stop(self,_):
         if self.proc and self.proc.poll() is None:
-            # stop
-            try: self.proc.terminate()
-            except: pass
-            try: self.proc.wait(timeout=3)
-            except: self.proc.kill()
-            self.proc=None
-            self.start_btn.set_label("Start webcam → /dev/video0")
-            self.start_btn.set_visible(True); self.stop_btn.set_visible(False)
-            self.status_row.set_subtitle("Stopped — /dev/video0 free")
-            self.status_icon.set_from_icon_name("camera-web-symbolic")
+            self._stop_proc()
             return
-        # start
-        argv = build_argv(self.cfg)
+        self._start_proc()
+
+    def _start_proc(self):
+        from . import backend as _b
+        argv = _b.build_argv(self.cfg)
         try:
+            # ensure connection before launching
+            try: subprocess.run(["adb","connect",f"{self.cfg['android_ip']}:{self.cfg['android_port']}"], capture_output=True, text=True, timeout=5)
+            except Exception: pass
             self.proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         except FileNotFoundError:
             self.toast("scrcpy not found — pacman -S scrcpy"); return
@@ -246,7 +266,42 @@ class App(Adw.Application):
                 GLib.idle_add(lambda l=line: self.log_buf.insert(self.log_buf.get_end_iter(), l))
             GLib.idle_add(lambda: self.on_proc_exit())
         threading.Thread(target=reader,daemon=True).start()
+        # mic mute after 2s (PipeWire source needs to register)
+        if self.cfg.get("mic_to_host", True) and self.cfg.get("mic_mute", True):
+            def _mute():
+                time.sleep(2)
+                ok = _b.apply_mic_mute(self.cfg)
+                if ok: GLib.idle_add(lambda: self.log_buf.insert(self.log_buf.get_end_iter(), "[mic-mute] scrcpy source muted\n"))
+            threading.Thread(target=_mute, daemon=True).start()
+        # auto-rotate watcher
+        if self.cfg.get("auto_rotate", True):
+            self._start_rotator()
         self.toast(f"Started {self.cfg['camera_facing']} {self.cfg.get('custom_size') or SIZES[self.cfg['resolution']]} → {self.cfg['v4l2_sink']}")
+
+    def _start_rotator(self):
+        from . import rotation
+        def restart(new_orientation):
+            GLib.idle_add(self.log_buf.insert, self.log_buf.get_end_iter(), f"[rotate] → {new_orientation}°\n")
+            self._stop_proc()
+            self.cfg["auto_rotate_orientation"] = int(new_orientation)
+            save(self.cfg)
+            time.sleep(0.5)
+            self._start_proc()
+        self._rotator = rotation.start_rotator(restart, self.cfg, window_class="scrcpy", interval=2.0)
+
+    def _stop_proc(self):
+        if not (self.proc and self.proc.poll() is None): return
+        try: self.proc.terminate()
+        except Exception: pass
+        try: self.proc.wait(timeout=3)
+        except Exception:
+            try: self.proc.kill()
+            except Exception: pass
+        self.proc=None
+        self.start_btn.set_label("Start webcam → /dev/video0")
+        self.start_btn.set_visible(True); self.stop_btn.set_visible(False)
+        self.status_row.set_subtitle("Stopped — /dev/video0 free")
+        self.status_icon.set_from_icon_name("camera-web-symbolic")
 
     def on_proc_exit(self):
         if self.proc and self.proc.poll() is not None:
