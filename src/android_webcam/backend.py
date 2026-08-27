@@ -1,7 +1,7 @@
 """scrcpy ↔ v4l2 backend. Pure argv builder + lifecycle; no GTK."""
 import subprocess, shlex, shutil, time, json
 from pathlib import Path
-from .config import SIZES, load
+from .config import SIZES, load, save, target
 
 def scrcpy_exists() -> bool: return shutil.which("scrcpy") is not None
 def adb_exists() -> bool: return shutil.which("adb") is not None
@@ -32,17 +32,89 @@ def adb_ping(cfg: dict, timeout=3) -> tuple[bool,str]:
     tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
     try:
         r = subprocess.run(["adb","-s",tgt,"shell","echo","ok"], capture_output=True, text=True, timeout=timeout)
-        return ("ok" in r.stdout, r.stdout.strip() or r.stderr.strip())
+        if "ok" in r.stdout:
+            return (True, r.stdout.strip())
+        # try connect first
+        rc,msg = connect_adb(cfg)
+        if not rc: return (False, msg)
+        r = subprocess.run(["adb","-s",tgt,"shell","echo","ok"], capture_output=True, text=True, timeout=timeout)
+        return ("ok" in r.stdout, r.stdout.strip() or r.stderr.strip() or msg)
     except Exception as e:
-        return (False, str(e))
+        # try connect
+        rc,msg = connect_adb(cfg)
+        if not rc: return (False, f"ping fail: {e}; connect: {msg}")
+        try:
+            r = subprocess.run(["adb","-s",tgt,"shell","echo","ok"], capture_output=True, text=True, timeout=timeout)
+            return ("ok" in r.stdout, r.stdout.strip() or r.stderr.strip())
+        except Exception as e2:
+            return (False, f"retry fail: {e2}")
 
 def connect_adb(cfg: dict) -> tuple[bool,str]:
     tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
     try:
         r = subprocess.run(["adb","connect",tgt], capture_output=True, text=True, timeout=5)
-        return (r.returncode==0, (r.stdout+r.stderr).strip())
+        msg = (r.stdout+r.stderr).strip()
+        if "connected" in msg or r.returncode==0:
+            return (True, msg)
+        return (False, msg)
     except Exception as e:
         return (False, str(e))
+
+def discover_phone(cfg: dict, gateway: str = "192.168.1.1") -> tuple[bool,str]:
+    """Scan the local /24 for an open 5555 adb port; if found, update cfg and return new target.
+    Scans reachable hosts from arp cache first, then probes /24 in parallel batches.
+    """
+    import re as _re
+    from .config import save
+    # read /proc/net/route for local interface subnet
+    def _subnet():
+        try:
+            with open("/proc/net/route") as f:
+                for line in f.readlines()[1:]:
+                    parts = line.split()
+                    if parts[1] != "00000000" or not int(parts[3],16) & 2: continue
+                    iface = parts[0]
+                    gw_hex = parts[2]
+                    # parse via ip route (more reliable)
+                    import subprocess as sp
+                    r = sp.run(["ip","-4","addr","show",iface], capture_output=True, text=True, timeout=2)
+                    m = _re.search(r"inet (\d+\.\d+\.\d+)\/(\d+)", r.stdout)
+                    if m:
+                        import ipaddress
+                        net = ipaddress.ip_network(f"{m.group(1)}/{m.group(2)}", strict=False)
+                        return str(net.network_address), int(m.group(2)), iface
+        except Exception: pass
+        return ("192.168.1.0", 24, "wlan0")
+    base,prefix,iface = _subnet()
+    if prefix != 24:
+        return (False, f"non-/24 subnet ({prefix}) - manual IP needed")
+    import concurrent.futures, socket
+    found = []
+    def _probe(ip):
+        try:
+            s = socket.socket(); s.settimeout(0.5)
+            s.connect((ip, 5555)); s.close()
+            return ip
+        except Exception: return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
+        for r in ex.map(_probe, [f"{base.rsplit('.',1)[0]}.{i}" for i in range(1,255)]):
+            if r: found.append(r)
+    if not found:
+        return (False, f"no 5555 open in {base}/24")
+    # try each candidate — connect + verify it's a phone
+    for ip in found:
+        try:
+            cr = subprocess.run(["adb","connect",f"{ip}:5555"], capture_output=True, text=True, timeout=4)
+            if "connected" not in cr.stdout + cr.stderr: continue
+            sr = subprocess.run(["adb","-s",f"{ip}:5555","shell","getprop ro.product.model"], capture_output=True, text=True, timeout=4)
+            model = sr.stdout.strip()
+            if model:
+                cfg["android_ip"] = ip
+                save(cfg)
+                return (True, f"found {model} at {ip}:5555")
+            subprocess.run(["adb","disconnect",f"{ip}:5555"], capture_output=True, timeout=2)
+        except Exception: continue
+    return (False, f"found 5555 open on {found} but none is Android")
 
 def list_cameras(cfg: dict) -> str:
     try:
@@ -53,12 +125,18 @@ def list_cameras(cfg: dict) -> str:
 
 def start(cfg: dict) -> subprocess.Popen:
     argv = build_argv(cfg)
+    # ensure connection before launching scrcpy (avoids 'No route to host' / 'Connection refused')
+    tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
+    try:
+        subprocess.run(["adb","connect",tgt], capture_output=True, text=True, timeout=5)
+    except Exception: pass
     # brightness low hook (best-effort, no root needed for settings/cmd)
     if cfg.get("stay_brightness_low"):
-        tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
-        subprocess.Popen(["adb","-s",tgt,"shell",
-                          "settings put system screen_brightness_mode 0; settings put system screen_brightness 1; cmd display set-brightness 0.001"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.run(["adb","-s",tgt,"shell",
+                            "settings put system screen_brightness_mode 0; settings put system screen_brightness 1; cmd display set-brightness 0.001"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except Exception: pass
     return subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
 def cli():
@@ -72,8 +150,23 @@ def cli():
     p.add_argument("--with-audio", action="store_true"); p.add_argument("--no-audio", dest="no_audio", action="store_true")
     p.add_argument("--with-preview", action="store_true"); p.add_argument("--no-window", action="store_true")
     p.add_argument("--v4l2-sink", default=None); p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--discover", action="store_true", help="Scan LAN for phone adb (port 5555) and update config")
+    p.add_argument("--set-ip", help="Set phone IP and save to config (like android-screen)")
     a = p.parse_args()
     cfg = load()
+    if a.set_ip:
+        if ":" in a.set_ip:
+            ip,port = a.set_ip.rsplit(":",1)
+            cfg["android_ip"]=ip; cfg["android_port"]=int(port)
+        else:
+            cfg["android_ip"]=a.set_ip
+        save(cfg)
+        print(f"Saved IP {cfg['android_ip']}:{cfg['android_port']} to config")
+        return
+    if a.discover:
+        ok,msg = discover_phone(cfg)
+        print(msg)
+        return
     if a.back: cfg["camera_facing"]="back"
     if a.front: cfg["camera_facing"]="front"
     if a.r720: cfg["resolution"]="720p"

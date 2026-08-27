@@ -194,13 +194,25 @@ class App(Adw.Application):
 
     def on_ping(self,_):
         def bg():
+            from .backend import adb_ping, discover_phone
             ok,msg = adb_ping(self.cfg)
-            GLib.idle_add(lambda: self.status_row.set_subtitle(f"{'✓ reachable' if ok else '✗ unreachable'} — {msg[:80]}"))
+            if not ok and "no route" in (msg or "").lower() or "not found" in (msg or "").lower() or "refused" in (msg or "").lower():
+                GLib.idle_add(lambda: self.status_row.set_subtitle(f"✗ {msg[:60]} — searching…"))
+                ok2,msg2 = discover_phone(self.cfg)
+                GLib.idle_add(lambda: self.status_row.set_subtitle(
+                    f"{'✓ found ' if ok2 else '✗ not found'} {msg2[:60]}"))
+                if ok2: self.refresh_cmd()
+            else:
+                GLib.idle_add(lambda: self.status_row.set_subtitle(f"{'✓ reachable' if ok else '✗ unreachable'} — {msg[:80]}"))
         threading.Thread(target=bg,daemon=True).start()
 
     def on_connect(self,_):
         def bg():
+            from .backend import adb_ping, discover_phone
             ok,msg=connect_adb(self.cfg)
+            if not ok:
+                ok2,msg2 = discover_phone(self.cfg)
+                if ok2: msg = f"discovered: {msg2}"
             GLib.idle_add(lambda: self.toast(f"{'Connected' if ok else 'Connect failed'}: {msg[:80]}"))
             GLib.idle_add(lambda: self.on_ping(None))
         threading.Thread(target=bg,daemon=True).start()
