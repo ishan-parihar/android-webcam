@@ -5,7 +5,7 @@ from gi.repository import Gtk, Adw, GLib, Gio
 import subprocess, threading, shlex, os, time, logging
 from pathlib import Path
 from .config import load, save, SIZES, FPS_CHOICES
-from .backend import build_argv, adb_ping, connect_adb, discover_phone, quick_reachable
+from .backend import build_argv, adb_ping, connect_adb, discover_phone, quick_reachable, _wait_device_ready, _adb_shell_echo
 
 # log to /tmp for diagnosis when the GUI is launched via desktop file (no
 # visible terminal). The user can `tail -f /tmp/android-webcam-gui.log`.
@@ -113,19 +113,19 @@ class App(Adw.Application):
         grp_extra.add(self.torch_row)
 
         # Audio: two independent switches
-        self.mic_row = Adw.SwitchRow(title="Microphone (mic → host)", subtitle="PipeWire source 'scrcpy' carries phone mic. Muted by default to avoid echo.")
+        self.mic_row = Adw.SwitchRow(title="Microphone (phone mic → system)", subtitle="PipeWire source 'scrcpy' carries the phone's microphone.  ON by default — phone acts as your real system mic (no manual setup needed in browser/zoom/meet).")
         self.mic_row.set_active(bool(self.cfg.get("mic_to_host", True)))
         self.mic_row.connect("notify::active", self.on_mic)
         grp_extra.add(self.mic_row)
-        self.mic_mute_row = Adw.SwitchRow(title="Unmute mic on host", subtitle="When mic is on, leave it unmuted. Default OFF (echo protection).")
-        self.mic_mute_row.set_active(not bool(self.cfg.get("mic_mute", True)))
+        self.mic_mute_row = Adw.SwitchRow(title="Mute mic on host", subtitle="Force-mute the forwarded mic at startup.  OFF by default (phone is your mic).  Turn ON if you hear echo/feedback.")
+        self.mic_mute_row.set_active(bool(self.cfg.get("mic_mute", False)))
         self.mic_mute_row.connect("notify::active", self.on_mic_mute)
         grp_extra.add(self.mic_mute_row)
-        self.speaker_row = Adw.SwitchRow(title="Host mic → phone speakers", subtitle="Forward host microphone to phone audio output. Use phone as a speaker for host audio.")
+        self.speaker_row = Adw.SwitchRow(title="Host mic → phone speakers", subtitle="Forward host microphone to phone audio output (use phone as a speaker).  OFF by default — avoid feedback loops.")
         self.speaker_row.set_active(bool(self.cfg.get("mic_to_phone", False)))
         self.speaker_row.connect("notify::active", self.on_speaker)
         grp_extra.add(self.speaker_row)
-        self.audio_info = Gtk.Label(label="Combinations:  mic only → safe (muted);  mic+unmute → enable per-app in pavucontrol;  speaker only → host mic piped to phone (--audio-source=playback --audio-dup);  mic+speaker → full duplex (feedback risk).")
+        self.audio_info = Gtk.Label(label="Default: phone mic → system (no setup).  Enable 'Mute mic' only if you hear echo.  'Host mic → phone speakers' routes your computer's mic to the phone's speaker for use as a remote speakerphone.")
         self.audio_info.set_wrap(True); self.audio_info.set_xalign(0)
         grp_extra.add(self.audio_info)
         # v4l2 sink + buffer
@@ -191,82 +191,104 @@ class App(Adw.Application):
         → if reachable, immediately auto-start streaming.  Runs once on
         startup, no user click required.  Logs to /tmp/android-webcam-gui.log.
 
-        Strategy: ALWAYS run a fresh adb-state check + discover scan at startup
-        so a stale 'offline' adb state never blocks auto-start.  Discover
-        itself now resets adb and skips gateway UPnP false positives.
+        Runs on a background thread (this is a 5-30s operation) and posts
+        status updates back to the main loop via GLib.idle_add so the window
+        stays responsive and the user sees 'Searching...' / 'Connecting...'
+        progress rather than a frozen UI.
         """
-        logging.info("=== _on_startup === cfg=%s:%s facing=%s res=%s",
+        logging.info("=== _on_startup (thread) === cfg=%s:%s facing=%s res=%s",
                       self.cfg.get("android_ip"), self.cfg.get("android_port"),
                       self.cfg.get("camera_facing"), self.cfg.get("resolution"))
+        GLib.idle_add(self._set_status, "Scanning for phone…", "search")
+        threading.Thread(target=self._startup_worker, daemon=True).start()
+        return False
+
+    def _set_status(self, subtitle: str, icon: str = "search"):
+        """Thread-safe status update.  icon ∈ {search,ok,bad,camera}."""
+        self.status_row.set_subtitle(subtitle)
+        icon_names = {
+            "search": "system-search-symbolic",
+            "ok": "object-select-symbolic",
+            "bad": "dialog-error-symbolic",
+            "camera": "camera-web-symbolic",
+        }
+        self.status_icon.set_from_icon_name(icon_names.get(icon, "camera-web-symbolic"))
+        logging.info("status: [%s] %s", icon, subtitle)
+
+    def _startup_worker(self):
+        """Background thread: probe → discover → auto-start.  Posts status
+        updates back to the main loop.  Waits for the adb per-device auth
+        handshake to finish before issuing `adb shell` (fixes the GUI-vs-CLI
+        parity bug where the first shell call after connect always times out).
+        """
+        import time as _t
         tgt_ip = self.cfg.get("android_ip")
-        tgt_port = int(self.cfg.get("android_port", 5555))
-
-        def _quick_shell(ip, port):
-            try:
-                r = subprocess.run(["adb","-s",f"{ip}:{port}","shell","echo","ok"],
-                                   capture_output=True, text=True, timeout=4)
-                return "ok" in r.stdout
-            except Exception:
-                return False
-
-        # Step 1: try the configured target first (no scan cost)
+        tgt_port = int(self.cfg.get("android_port", 5555)) if self.cfg.get("android_port") else 5555
         shell_ok = False
-        if tgt_ip:
-            logging.info("step1: try configured %s:%d", tgt_ip, tgt_port)
-            try:
-                subprocess.run(["adb","disconnect",f"{tgt_ip}:{tgt_port}"],
-                               capture_output=True, timeout=2)
-                time.sleep(0.3)
-                subprocess.run(["adb","connect",f"{tgt_ip}:{tgt_port}"],
-                               capture_output=True, text=True, timeout=6)
-            except Exception: pass
-            shell_ok = _quick_shell(tgt_ip, tgt_port)
-            logging.info("step1: configured target shell_ok=%s", shell_ok)
 
-        # Step 2: if configured target fails, run discover (resets adb, scans /24,
-        # skips gateway, retries each candidate 3x)
+        def try_target(ip, port, why):
+            """Try to verify one IP:port is actually responsive.
+            Returns True on success and updates cfg."""
+            logging.info("trying %s:%d (%s)", ip, port, why)
+            GLib.idle_add(self._set_status, f"Connecting to {ip}:{port}…", "search")
+            try:
+                subprocess.run(["adb","disconnect",f"{ip}:{port}"],
+                               capture_output=True, timeout=2)
+            except Exception: pass
+            _t.sleep(0.3)
+            try:
+                cr = subprocess.run(["adb","connect",f"{ip}:{port}"],
+                                    capture_output=True, text=True, timeout=8)
+                logging.info("adb connect -> %r", (cr.stdout+cr.stderr).strip())
+            except Exception as e:
+                logging.warning("adb connect error: %s", e)
+            # wait for auth handshake to complete — the difference between
+            # CLI (which has human delay) and GUI (which fires shell
+            # immediately and times out).
+            ready = _wait_device_ready(ip, port, timeout=5.0)
+            if not ready:
+                logging.warning("device not ready after connect: %s:%d", ip, port)
+                return False
+            shell_ok = _adb_shell_echo(ip, port, timeout=4.0)
+            if not shell_ok:
+                logging.warning("shell echo failed: %s:%d", ip, port)
+                return False
+            self.cfg["android_ip"] = ip
+            self.cfg["android_port"] = port
+            from .config import save
+            save(self.cfg)
+            return True
+
+        # 1) try the configured target
+        if tgt_ip:
+            shell_ok = try_target(tgt_ip, tgt_port, "configured")
+
+        # 2) discover on failure
         if not shell_ok:
-            logging.info("step2: running discover_phone (resets adb state)…")
-            GLib.idle_add(self.status_row.set_subtitle,
-                          "✗ unreachable — searching LAN…")
-            ok2, msg2 = discover_phone(self.cfg)
-            logging.info("step2: discover -> %s %s", ok2, msg2)
-            if not ok2:
-                # 3rd attempt: full adb-server restart + retry
-                logging.info("step3: adb kill-server + start-server, retry discover")
-                try: subprocess.run(["adb","kill-server"], capture_output=True, timeout=3)
-                except Exception: pass
-                time.sleep(2)
-                try: subprocess.run(["adb","start-server"], capture_output=True, timeout=4)
-                except Exception: pass
-                ok2, msg2 = discover_phone(self.cfg)
-                logging.info("step3: discover retry -> %s %s", ok2, msg2)
-            if ok2:
-                self.refresh_cmd()
+            logging.info("discover_phone (thread)…")
+            GLib.idle_add(self._set_status, "Searching LAN for phone…", "search")
+            ok, msg = discover_phone(self.cfg)
+            logging.info("discover -> %s %s", ok, msg)
+            if ok:
                 tgt_ip = self.cfg["android_ip"]
                 tgt_port = int(self.cfg["android_port"])
-                shell_ok = _quick_shell(tgt_ip, tgt_port)
-                logging.info("step2/3: discovered target shell_ok=%s", shell_ok)
-            else:
-                GLib.idle_add(self.status_row.set_subtitle, f"✗ {msg2[:80]}")
-                GLib.idle_add(self.toast, "Phone unreachable. Check WiFi / USB debugging.")
-                logging.warning("auto-start aborted: %s", msg2)
-                return False
+                GLib.idle_add(self.refresh_cmd)
+                shell_ok = try_target(tgt_ip, tgt_port, "discovered")
 
-        # Step 4: auto-start
+        # 3) decide
         if shell_ok:
-            logging.info("step4: auto-start scrcpy -> /dev/video0")
-            GLib.idle_add(self.status_row.set_subtitle,
-                          f"✓ reachable at {tgt_ip}:{tgt_port} — auto-start")
+            logging.info("auto-start -> /dev/video0")
+            GLib.idle_add(self._set_status,
+                          f"✓ {tgt_ip}:{tgt_port} — auto-starting webcam…", "ok")
             GLib.idle_add(self.toast, "Auto-starting webcam…")
-            # call _start_proc DIRECTLY (no nested thread that can be killed
-            # by an early mainloop teardown).  _start_proc is fully GLib-safe.
+            # give the UI a beat to repaint
+            _t.sleep(0.4)
             GLib.idle_add(self._start_proc)
         else:
-            logging.warning("step4: auto-start skipped: shell_ok=False")
-            GLib.idle_add(self.status_row.set_subtitle,
-                          f"✗ unreachable at {tgt_ip}:{tgt_port}")
-        return False
+            logging.warning("auto-start aborted: phone unreachable")
+            GLib.idle_add(self._set_status,
+                          f"✗ unreachable — press Connect or check WiFi", "bad")
+            GLib.idle_add(self.toast, "Phone unreachable. Press Connect to retry.")
 
     def refresh_cmd(self):
         argv = build_argv(self.cfg)
@@ -309,8 +331,9 @@ class App(Adw.Application):
         if row.get_active(): self.toast("Phone mic → host (muted). Unmute in pavucontrol if you want it.")
 
     def on_mic_mute(self,row,_):
-        self.cfg["mic_mute"]=not row.get_active(); save(self.cfg); self.refresh_cmd()
-        if not row.get_active(): self.toast("Echo warning: speakers → phone mic can feedback. Use headphones.")
+        # row active = mute the host-side scrcpy source (echo protection)
+        self.cfg["mic_mute"]=row.get_active(); save(self.cfg); self.refresh_cmd()
+        if row.get_active(): self.toast("Phone mic muted on host (echo protection).")
 
     def on_speaker(self,row,_):
         self.cfg["mic_to_phone"]=row.get_active(); save(self.cfg); self.refresh_cmd()

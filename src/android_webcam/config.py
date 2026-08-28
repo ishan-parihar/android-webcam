@@ -16,15 +16,20 @@ DEFAULTS = {
     "fps": 30,
     "torch": False,
     # Two independent audio flags (replaces single with_audio):
-    #   mic_to_host  : forward phone mic to host (PipeWire source "scrcpy").
-    #                   Default ON but muted (no echo). User unmutes per-app in
-    #                   pavucontrol / browser picker.
+    #   mic_to_host  : forward phone mic to host as PipeWire source "scrcpy".
+    #                   Default ON, UNMUTED — phone acts as a real mic for the
+    #                   system.  Apps (browser, zoom, meet, etc.) just pick
+    #                   "scrcpy" in their input picker and it works.
+    #   mic_mute     : force-mute the forwarded mic on host at startup.  OFF
+    #                   by default.  Enable if you hear echo/feedback (e.g.
+    #                   your phone is sitting near your speakers and you have
+    #                   a mic-monitoring app open).
     #   mic_to_phone : also forward host microphone back to phone audio output.
     #                   Enables a phone-side mic that captures host audio
-    #                   (e.g. for a phone-as-mic use case). OFF by default
-    #                   to avoid feedback loops with phone speakers.
+    #                   (e.g. for a phone-as-speaker use case).  OFF by
+    #                   default to avoid feedback loops with phone speakers.
     "mic_to_host": True,
-    "mic_mute": True,         # mute the forwarded mic on host (no echo)
+    "mic_mute": False,        # unmuted by default — phone IS the system mic
     "mic_to_phone": False,
     "audio_source": "mic",
     "with_preview": False,

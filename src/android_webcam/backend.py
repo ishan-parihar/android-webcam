@@ -125,6 +125,41 @@ def connect_adb(cfg: dict) -> tuple[bool,str]:
     except Exception as e:
         return (False, str(e))
 
+def _wait_device_ready(ip: str, port: int, timeout: float = 6.0) -> bool:
+    """After `adb connect` returns 'connected', the per-device auth handshake
+    is still in progress for ~1-3s.  Issuing `adb shell` immediately times out
+    because the device is in 'authorizing' / 'offline' state.
+
+    This polls `adb -s IP:PORT get-state` every 200ms until it returns
+    'device' or the timeout elapses.  Returns True iff ready.
+    """
+    tgt = f"{ip}:{port}"
+    import time as _t
+    deadline = _t.monotonic() + timeout
+    while _t.monotonic() < deadline:
+        try:
+            r = subprocess.run(["adb","-s",tgt,"get-state"],
+                               capture_output=True, text=True, timeout=2)
+            if "device" in r.stdout:  # exactly 'device\n' (no 'offline' prefix)
+                return True
+        except Exception: pass
+        _t.sleep(0.2)
+    return False
+
+
+def _adb_shell_echo(ip: str, port: int, timeout: float = 4.0) -> bool:
+    """Issue `adb -s IP:PORT shell echo ok` and return True iff 'ok' returned.
+    Caller should have called _wait_device_ready first.
+    """
+    tgt = f"{ip}:{port}"
+    try:
+        r = subprocess.run(["adb","-s",tgt,"shell","echo","ok"],
+                           capture_output=True, text=True, timeout=timeout)
+        return "ok" in r.stdout
+    except Exception:
+        return False
+
+
 def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False) -> tuple[bool,str]:
     """Scan the local /24 for an open 5555 adb port; if found, update cfg
     and return new target. Tries 5555, 5554, 5556-5558 (Termux default + adb
@@ -188,12 +223,17 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False)
         except Exception: pass
     if not found:
         return (False, f"no 5555/5554/5556-5558 open in {base}/24 (excluding gateway)")
-    # 1) reset adb state, 2) try each candidate with retry, 3) require real shell
-    try: subprocess.run(["adb","kill-server"], capture_output=True, timeout=3)
-    except Exception: pass
-    time.sleep(1.5)
-    try: subprocess.run(["adb","start-server"], capture_output=True, timeout=3)
-    except Exception: pass
+    # ONLY kill the adb server if no candidate responds to get-state, AND as a
+    # last resort.  Killing adb-server drops ALL in-flight per-device auth
+    # handshakes and closes the local TCP socket for the duration of
+    # start-server, which causes our subsequent TCP scan to find nothing.
+    cfg_ip = cfg.get("android_ip")
+    cfg_port = int(cfg.get("android_port", 5555)) if cfg.get("android_port") else None
+    # If the configured target is in our candidate list, try it FIRST (avoids
+    # killing adb-server if the user is already pointed at the right place).
+    if cfg_ip and cfg_port and (cfg_ip, cfg_port) in [(c[0], c[1]) for c in found]:
+        found.remove((cfg_ip, cfg_port))
+        found.insert(0, (cfg_ip, cfg_port))
     for ip, port in found:
         for attempt in range(3):
             try:
@@ -203,13 +243,12 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False)
                 if "connected" not in (cr.stdout + cr.stderr):
                     time.sleep(0.5 * (attempt+1))
                     continue
-                # verify state is 'device' (not 'offline')
-                state_r = subprocess.run(["adb","-s",f"{ip}:{port}","get-state"],
-                                         capture_output=True, text=True, timeout=4)
-                if "device" not in state_r.stdout:
+                # wait for auth handshake to finish — without this, the next
+                # `adb shell` times out because the device is still 'offline'
+                # in the adb daemon's per-device state machine
+                if not _wait_device_ready(ip, port, timeout=4.0):
                     time.sleep(0.5 * (attempt+1))
                     continue
-                # real liveness check — model must be non-empty
                 sr = subprocess.run(["adb","-s",f"{ip}:{port}","shell","getprop ro.product.model"],
                                      capture_output=True, text=True, timeout=8)
                 model = sr.stdout.strip()
@@ -222,6 +261,28 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False)
             except Exception as e:
                 time.sleep(0.5 * (attempt+1))
                 continue
+    # last resort: reset adb server state and retry the first candidate
+    logging.info("discover: candidates exhausted, trying kill+start+retry")
+    try: subprocess.run(["adb","kill-server"], capture_output=True, timeout=3)
+    except Exception: pass
+    time.sleep(1.5)
+    try: subprocess.run(["adb","start-server"], capture_output=True, timeout=3)
+    except Exception: pass
+    for ip, port in found[:5]:  # only retry a few, not all 254
+        for attempt in range(2):
+            try:
+                cr = subprocess.run(["adb","connect",f"{ip}:{port}"], capture_output=True, text=True, timeout=8)
+                if "connected" not in (cr.stdout + cr.stderr): continue
+                if not _wait_device_ready(ip, port, timeout=5.0): continue
+                sr = subprocess.run(["adb","-s",f"{ip}:{port}","shell","getprop ro.product.model"],
+                                     capture_output=True, text=True, timeout=8)
+                model = sr.stdout.strip()
+                if model and "error" not in model.lower():
+                    cfg["android_ip"] = ip
+                    cfg["android_port"] = int(port)
+                    save(cfg)
+                    return (True, f"found {model} at {ip}:{port} (after kill+start)")
+            except Exception: continue
     return (False, f"found adb on {found[:5]} but none responded to getprop after retries")
 
 def quick_reachable(cfg: dict) -> bool:
