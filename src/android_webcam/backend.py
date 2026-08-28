@@ -9,10 +9,19 @@ def adb_exists() -> bool: return shutil.which("adb") is not None
 def build_argv(cfg: dict, extra: list | None = None) -> list[str]:
     """Compose scrcpy argv.
 
-    Audio is composed of two independent flags:
-      mic_to_host  (default ON,  muted by mic_mute) -> --audio-source=mic
-      mic_to_phone (default OFF)                    -> --audio-dup + output
-      mic_mute     (default True)                   -> -Pmute=1 pipewire flag
+    Audio model (two independent flags):
+      mic_to_host  (default ON)  -> --audio-source=mic
+                                   + --no-audio-playback (no echo!)
+      mic_to_phone (default OFF) -> --audio-source=playback --audio-dup
+                                    (host audio -> phone speakers; use phone
+                                     as a remote speakerphone)
+      mic_mute     (default False) -> pactl set-source-mute scrcpy 1 after start
+      mic_default  (default True)  -> pactl set-default-source scrcpy after start
+
+    Critical: --no-audio-playback MUST be added when mic_to_host is on and
+    mic_to_phone is off.  Without it, scrcpy plays the captured phone mic
+    through the host's default sink (HDMI speakers) creating an infinite
+    echo loop.  See issue: "My speakers are still routing the phone's mic".
     """
     tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
     size = cfg.get("custom_size") or SIZES.get(cfg.get("resolution","1080p"), "1920x1080")
@@ -33,29 +42,28 @@ def build_argv(cfg: dict, extra: list | None = None) -> list[str]:
     if cfg.get("video_bit_rate"): argv += [f"--video-bit-rate={cfg['video_bit_rate']}"]
     if not cfg.get("with_preview"): argv.append("--no-window")
 
-    # Audio: two-flag composition
+    # Audio: two-flag composition (mutually exclusive combos)
     mic_to_host = bool(cfg.get("mic_to_host", True))
     mic_to_phone = bool(cfg.get("mic_to_phone", False))
-    mic_mute = bool(cfg.get("mic_mute", True))
     if mic_to_host and not mic_to_phone:
-        # forward mic to host only (recommended; default)
-        argv.append(f"--audio-source={cfg.get('audio_source','mic')}")
+        # Default: phone mic -> host as PipeWire source for apps to use.
+        # --no-audio-playback prevents scrcpy from playing the mic through
+        # the host's default sink (HDMI speakers), which is what causes
+        # the infinite echo.  Apps pull from the 'scrcpy' source as normal.
+        argv += [
+            f"--audio-source={cfg.get('audio_source','mic')}",
+            "--no-audio-playback",
+        ]
     elif mic_to_host and mic_to_phone:
-        # mic + duplex audio to phone (full audio loop — risk of feedback)
+        # phone mic -> host AND host audio -> phone (full duplex, echo risk)
         argv += [f"--audio-source={cfg.get('audio_source','mic')}", "--audio-dup"]
     elif not mic_to_host and mic_to_phone:
-        # host audio -> phone speakers, no mic forwarding
+        # "Speakerphone" mode: host audio -> phone speakers, no mic forwarding
         argv += ["--audio-source=playback", "--audio-dup"]
     else:
         # neither
         argv.append("--no-audio")
 
-    # Mute the forwarded mic on host (PipeWire/Pulse) to avoid echo unless
-    # the user has explicitly turned mute off. We use the scrcpy-internal
-    # route via a Pulse/PipeWire mute. The standard CLI doesn't expose a
-    # mute switch, so we set the source's mute property via pactl/wpctl
-    # after start().  Here we just tag the config; the muting is done
-    # by start() via apply_mic_mute().
     if extra: argv += extra
     return argv
 
@@ -80,6 +88,67 @@ def apply_mic_mute(cfg: dict) -> bool:
         except Exception:
             continue
     return False
+
+
+def set_phone_as_system_mic(cfg: dict) -> dict:
+    """Make the forwarded phone mic the system default input source.
+
+    Returns a dict with the previous default source info so it can be
+    restored on stop.  No-op if mic_to_host is off.
+
+    Without this, the scrcpy source appears in apps' input picker but apps
+    default to whatever the system default was before (often a monitor
+    source or nothing).  This is the difference between "you can pick it
+    manually in each app" and "your system mic is just the phone".
+    """
+    info = {"prev_default_source": None, "prev_default_mute": None, "set": False}
+    if not cfg.get("mic_to_host", True):
+        return info
+    # Wait briefly for scrcpy to register the source
+    time.sleep(2.0)
+    # 1) capture previous default
+    try:
+        r = subprocess.run(["pactl","get-default-source"], capture_output=True, text=True, timeout=3)
+        if r.returncode == 0:
+            info["prev_default_source"] = r.stdout.strip()
+            # also capture its mute state so we can restore it
+            r2 = subprocess.run(["pactl","get-source-mute", info["prev_default_source"]],
+                                 capture_output=True, text=True, timeout=3)
+            info["prev_default_mute"] = "yes" in r2.stdout.lower() if r2.returncode == 0 else None
+    except Exception: pass
+    # 2) set scrcpy as default + unmuted (or muted if mic_mute flag is on)
+    want_mute = "1" if cfg.get("mic_mute", False) else "0"
+    for cmd in (
+        ["pactl", "set-default-source", "scrcpy"],
+        ["pactl", "set-source-mute", "scrcpy", want_mute],
+    ):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            if r.returncode != 0:
+                # 'No such entity' if the scrcpy source isn't yet registered.
+                # wpctl fallback for WirePlumber:
+                if "scrcpy" in cmd[1:]:
+                    try:
+                        subprocess.run(["wpctl","set-default","scrcpy"], capture_output=True, timeout=3)
+                    except Exception: pass
+        except FileNotFoundError: continue
+        except Exception: continue
+    info["set"] = True
+    return info
+
+
+def restore_system_audio(prev: dict) -> bool:
+    """Restore the default audio source after scrcpy exits."""
+    if not prev or not prev.get("prev_default_source"): return False
+    src = prev["prev_default_source"]
+    try:
+        subprocess.run(["pactl","set-default-source",src], capture_output=True, timeout=3)
+        if prev.get("prev_default_mute") is not None:
+            want = "1" if prev["prev_default_mute"] else "0"
+            subprocess.run(["pactl","set-source-mute",src,want], capture_output=True, timeout=3)
+        return True
+    except Exception:
+        return False
 
 def adb_ping(cfg: dict, timeout=4) -> tuple[bool,str]:
     """Probe the phone.  Two-stage: (1) adb shell echo, (2) fall back to
@@ -329,8 +398,15 @@ def start(cfg: dict) -> subprocess.Popen:
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
         except Exception: pass
     p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    # Try to mute the forwarded mic so the user doesn't get echo by default
-    if cfg.get("mic_to_host", True) and cfg.get("mic_mute", True):
+    # Promote phone mic to system default source (so all apps pick it up)
+    if cfg.get("mic_to_host", True) and cfg.get("mic_default", True):
+        def _delay_default():
+            prev = set_phone_as_system_mic(cfg)
+            cfg["_mic_prev"] = prev
+        threading_mod = __import__("threading")
+        threading_mod.Thread(target=_delay_default, daemon=True).start()
+    elif cfg.get("mic_to_host", True) and cfg.get("mic_mute", True):
+        # Legacy: only mute, don't promote (kept for compatibility)
         def _delay_mute():
             time.sleep(2)  # wait for scrcpy to register the PipeWire source
             apply_mic_mute(cfg)

@@ -28,9 +28,14 @@ DEFAULTS = {
     #                   Enables a phone-side mic that captures host audio
     #                   (e.g. for a phone-as-speaker use case).  OFF by
     #                   default to avoid feedback loops with phone speakers.
+    #   mic_default  : promote the forwarded phone mic to the system default
+    #                   input source at startup.  ON by default.  Apps
+    #                   (browser, zoom, etc.) pick it up without any manual
+    #                   configuration.  Restored on stop.
     "mic_to_host": True,
     "mic_mute": False,        # unmuted by default — phone IS the system mic
     "mic_to_phone": False,
+    "mic_default": True,      # phone mic becomes system default source on start
     "audio_source": "mic",
     "with_preview": False,
     "v4l2_sink": "/dev/video0",

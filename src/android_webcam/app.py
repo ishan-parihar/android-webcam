@@ -113,19 +113,19 @@ class App(Adw.Application):
         grp_extra.add(self.torch_row)
 
         # Audio: two independent switches
-        self.mic_row = Adw.SwitchRow(title="Microphone (phone mic → system)", subtitle="PipeWire source 'scrcpy' carries the phone's microphone.  ON by default — phone acts as your real system mic (no manual setup needed in browser/zoom/meet).")
+        self.mic_row = Adw.SwitchRow(title="Phone mic → system (default)", subtitle="Forwards the phone's microphone to a PipeWire source called 'scrcpy' for apps to use.  ON by default — phone is your real system mic, no echo because scrcpy does NOT play the mic through your speakers.")
         self.mic_row.set_active(bool(self.cfg.get("mic_to_host", True)))
         self.mic_row.connect("notify::active", self.on_mic)
         grp_extra.add(self.mic_row)
-        self.mic_mute_row = Adw.SwitchRow(title="Mute mic on host", subtitle="Force-mute the forwarded mic at startup.  OFF by default (phone is your mic).  Turn ON if you hear echo/feedback.")
-        self.mic_mute_row.set_active(bool(self.cfg.get("mic_mute", False)))
-        self.mic_mute_row.connect("notify::active", self.on_mic_mute)
-        grp_extra.add(self.mic_mute_row)
-        self.speaker_row = Adw.SwitchRow(title="Host mic → phone speakers", subtitle="Forward host microphone to phone audio output (use phone as a speaker).  OFF by default — avoid feedback loops.")
+        self.mic_default_row = Adw.SwitchRow(title="Set 'scrcpy' as system default mic", subtitle="ON by default — every app (browser, zoom, discord) uses the phone mic without any manual setup.  Restored on stop.")
+        self.mic_default_row.set_active(bool(self.cfg.get("mic_default", True)))
+        self.mic_default_row.connect("notify::active", self.on_mic_default)
+        grp_extra.add(self.mic_default_row)
+        self.speaker_row = Adw.SwitchRow(title="Speakerphone (host audio → phone)", subtitle="OFF by default.  Forwards your computer's audio output to the phone's speaker — use your phone as a remote speakerphone.  Disable 'Phone mic → system' to avoid feedback.")
         self.speaker_row.set_active(bool(self.cfg.get("mic_to_phone", False)))
         self.speaker_row.connect("notify::active", self.on_speaker)
         grp_extra.add(self.speaker_row)
-        self.audio_info = Gtk.Label(label="Default: phone mic → system (no setup).  Enable 'Mute mic' only if you hear echo.  'Host mic → phone speakers' routes your computer's mic to the phone's speaker for use as a remote speakerphone.")
+        self.audio_info = Gtk.Label(label="Default: phone mic → system mic, no echo.  Speakerphone mode routes host audio → phone speakers (off by default).")
         self.audio_info.set_wrap(True); self.audio_info.set_xalign(0)
         grp_extra.add(self.audio_info)
         # v4l2 sink + buffer
@@ -328,12 +328,18 @@ class App(Adw.Application):
 
     def on_mic(self,row,_):
         self.cfg["mic_to_host"]=row.get_active(); save(self.cfg); self.refresh_cmd()
-        if row.get_active(): self.toast("Phone mic → host (muted). Unmute in pavucontrol if you want it.")
+        if row.get_active():
+            self.toast("Phone mic → system.  No echo — scrcpy will NOT play the mic through your speakers.")
+        else:
+            self.toast("Phone mic forwarding disabled.")
 
-    def on_mic_mute(self,row,_):
-        # row active = mute the host-side scrcpy source (echo protection)
-        self.cfg["mic_mute"]=row.get_active(); save(self.cfg); self.refresh_cmd()
-        if row.get_active(): self.toast("Phone mic muted on host (echo protection).")
+    def on_mic_default(self,row,_):
+        # row active = promote scrcpy to system default source at start
+        self.cfg["mic_default"]=row.get_active(); save(self.cfg); self.refresh_cmd()
+        if row.get_active():
+            self.toast("Phone mic will become system default mic on start.")
+        else:
+            self.toast("Phone mic available as a source, but NOT promoted to default.")
 
     def on_speaker(self,row,_):
         self.cfg["mic_to_phone"]=row.get_active(); save(self.cfg); self.refresh_cmd()
@@ -396,13 +402,19 @@ class App(Adw.Application):
                 GLib.idle_add(lambda l=line: self.log_buf.insert(self.log_buf.get_end_iter(), l))
             GLib.idle_add(lambda: self.on_proc_exit())
         threading.Thread(target=reader,daemon=True).start()
-        # mic mute after 2s (PipeWire source needs to register)
-        if self.cfg.get("mic_to_host", True) and self.cfg.get("mic_mute", True):
-            def _mute():
-                time.sleep(2)
-                ok = _b.apply_mic_mute(self.cfg)
-                if ok: GLib.idle_add(lambda: self.log_buf.insert(self.log_buf.get_end_iter(), "[mic-mute] scrcpy source muted\n"))
-            threading.Thread(target=_mute, daemon=True).start()
+        # mic: promote scrcpy to system default source (so all apps pick it up)
+        # and apply mute flag (echo protection).  Restore previous default on stop.
+        if self.cfg.get("mic_to_host", True):
+            def _mic_default():
+                time.sleep(2)  # wait for scrcpy to register PipeWire source
+                prev = _b.set_phone_as_system_mic(self.cfg)
+                self.cfg["_mic_prev"] = prev
+                if prev.get("set"):
+                    state = "muted" if self.cfg.get("mic_mute") else "live"
+                    GLib.idle_add(lambda: self.log_buf.insert(
+                        self.log_buf.get_end_iter(),
+                        f"[mic] scrcpy is system default mic ({state})\n"))
+            threading.Thread(target=_mic_default, daemon=True).start()
         # auto-rotate watcher
         if self.cfg.get("auto_rotate", True):
             self._start_rotator()
@@ -421,6 +433,12 @@ class App(Adw.Application):
 
     def _stop_proc(self):
         if not (self.proc and self.proc.poll() is None): return
+        # restore previous system default mic before tearing down scrcpy
+        from . import backend as _b
+        prev = self.cfg.get("_mic_prev")
+        if prev:
+            _b.restore_system_audio(prev)
+            self.cfg["_mic_prev"] = None
         try: self.proc.terminate()
         except Exception: pass
         try: self.proc.wait(timeout=3)
@@ -436,6 +454,12 @@ class App(Adw.Application):
     def on_proc_exit(self):
         if self.proc and self.proc.poll() is not None:
             code=self.proc.poll(); self.proc=None
+            # restore previous system default mic when scrcpy exits
+            from . import backend as _b
+            prev = self.cfg.get("_mic_prev")
+            if prev:
+                _b.restore_system_audio(prev)
+                self.cfg["_mic_prev"] = None
             self.start_btn.set_label("Start webcam → /dev/video0"); self.start_btn.set_visible(True); self.stop_btn.set_visible(False)
             self.status_row.set_subtitle(f"Exited {code} — /dev/video0 free"); self.status_icon.set_from_icon_name("camera-web-symbolic")
 
