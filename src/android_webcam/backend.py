@@ -132,6 +132,9 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False)
 
     `quick=True` does a faster scan with a shorter timeout and falls back to
     the arp cache / recent adb devices for quick retries.
+
+    Defensive: skips `192.168.1.1` (gateway's UPnP false positive), skips
+    candidates that come back 'offline' from adb, retries 3x with backoff.
     """
     import re as _re
     from .config import save
@@ -157,45 +160,69 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False)
     found = []
     ports = (5555, 5554, 5556, 5557, 5558)
     tcp_timeout = 0.25 if quick else 0.4
+    my_ip_prefix = base.rsplit('.', 1)[0]  # exclude ourselves + gateway
+    GATEWAY_IPS = {"192.168.1.1", "10.0.0.1", "192.168.0.1", "10.0.1.1", "172.16.0.1"}  # common UPnP false positives
 
     def _probe(ip_port):
         ip, port = ip_port
+        if ip in GATEWAY_IPS: return None
         try:
             s = socket.socket(); s.settimeout(tcp_timeout)
             s.connect((ip, port)); s.close()
             return (ip, port)
         except Exception: return None
-    targets = [(f"{base.rsplit('.',1)[0]}.{i}", p) for i in range(1,255) for p in ports]
+    targets = [(f"{my_ip_prefix}.{i}", p) for i in range(1,255) for p in ports]
     with concurrent.futures.ThreadPoolExecutor(max_workers=96) as ex:
         for r in ex.map(_probe, targets):
             if r: found.append(r)
     if not found:
-        # Fall back to recent adb devices: maybe the phone moved IP and we
-        # have an existing connection.
         try:
             r = subprocess.run(["adb","devices"], capture_output=True, text=True, timeout=3)
             for line in r.stdout.splitlines():
-                if "device" in line and ":" in line:
+                if "device" in line and ":" in line and "offline" not in line:
                     ip_port = line.split()[0]
-                    if ":" in ip_port: found.append(tuple(ip_port.split(":")))
+                    if ":" in ip_port:
+                        ip, port = ip_port.split(":", 1)
+                        if ip not in GATEWAY_IPS:
+                            found.append((ip, port))
         except Exception: pass
     if not found:
-        return (False, f"no 5555/5554/5556-5558 open in {base}/24")
+        return (False, f"no 5555/5554/5556-5558 open in {base}/24 (excluding gateway)")
+    # 1) reset adb state, 2) try each candidate with retry, 3) require real shell
+    try: subprocess.run(["adb","kill-server"], capture_output=True, timeout=3)
+    except Exception: pass
+    time.sleep(1.5)
+    try: subprocess.run(["adb","start-server"], capture_output=True, timeout=3)
+    except Exception: pass
     for ip, port in found:
-        try:
-            subprocess.run(["adb","disconnect",f"{ip}:{port}"], capture_output=True, timeout=2)
-            cr = subprocess.run(["adb","connect",f"{ip}:{port}"], capture_output=True, text=True, timeout=6)
-            if "connected" not in (cr.stdout + cr.stderr): continue
-            sr = subprocess.run(["adb","-s",f"{ip}:{port}","shell","getprop ro.product.model"], capture_output=True, text=True, timeout=6)
-            model = sr.stdout.strip()
-            if model:
-                cfg["android_ip"] = ip
-                cfg["android_port"] = int(port)
-                save(cfg)
-                return (True, f"found {model} at {ip}:{port}")
-            subprocess.run(["adb","disconnect",f"{ip}:{port}"], capture_output=True, timeout=2)
-        except Exception: continue
-    return (False, f"found adb on {found[:5]} but none is Android")
+        for attempt in range(3):
+            try:
+                subprocess.run(["adb","disconnect",f"{ip}:{port}"], capture_output=True, timeout=2)
+                time.sleep(0.3)
+                cr = subprocess.run(["adb","connect",f"{ip}:{port}"], capture_output=True, text=True, timeout=8)
+                if "connected" not in (cr.stdout + cr.stderr):
+                    time.sleep(0.5 * (attempt+1))
+                    continue
+                # verify state is 'device' (not 'offline')
+                state_r = subprocess.run(["adb","-s",f"{ip}:{port}","get-state"],
+                                         capture_output=True, text=True, timeout=4)
+                if "device" not in state_r.stdout:
+                    time.sleep(0.5 * (attempt+1))
+                    continue
+                # real liveness check — model must be non-empty
+                sr = subprocess.run(["adb","-s",f"{ip}:{port}","shell","getprop ro.product.model"],
+                                     capture_output=True, text=True, timeout=8)
+                model = sr.stdout.strip()
+                if model and "error" not in model.lower():
+                    cfg["android_ip"] = ip
+                    cfg["android_port"] = int(port)
+                    save(cfg)
+                    return (True, f"found {model} at {ip}:{port}")
+                time.sleep(0.5 * (attempt+1))
+            except Exception as e:
+                time.sleep(0.5 * (attempt+1))
+                continue
+    return (False, f"found adb on {found[:5]} but none responded to getprop after retries")
 
 def quick_reachable(cfg: dict) -> bool:
     """Returns True if the configured target is reachable.  Tries a TCP

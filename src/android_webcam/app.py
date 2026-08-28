@@ -190,86 +190,82 @@ class App(Adw.Application):
         """Initial boot: ping phone → if unreachable, run --discover → re-ping
         → if reachable, immediately auto-start streaming.  Runs once on
         startup, no user click required.  Logs to /tmp/android-webcam-gui.log.
+
+        Strategy: ALWAYS run a fresh adb-state check + discover scan at startup
+        so a stale 'offline' adb state never blocks auto-start.  Discover
+        itself now resets adb and skips gateway UPnP false positives.
         """
         logging.info("=== _on_startup === cfg=%s:%s facing=%s res=%s",
                       self.cfg.get("android_ip"), self.cfg.get("android_port"),
                       self.cfg.get("camera_facing"), self.cfg.get("resolution"))
-        # Step 1: read current cfg IP, attempt quick TCP probe (no adb)
         tgt_ip = self.cfg.get("android_ip")
         tgt_port = int(self.cfg.get("android_port", 5555))
-        if not tgt_ip:
-            logging.warning("no android_ip in config — running discover")
-            GLib.idle_add(self.status_row.set_subtitle, "✗ no IP — searching…")
-            ok, msg = discover_phone(self.cfg)
-            logging.info("discover (no-IP) -> %s %s", ok, msg)
-            if ok:
-                self.refresh_cmd()
-                tgt_ip, tgt_port = self.cfg["android_ip"], int(self.cfg["android_port"])
-            else:
-                GLib.idle_add(self.status_row.set_subtitle, f"✗ {msg[:80]}")
-                return
-        # Step 2: TCP probe to confirm the configured target is listening
-        logging.info("TCP probe %s:%d ...", tgt_ip, tgt_port)
-        try:
-            import socket
-            s = socket.socket(); s.settimeout(2.0)
-            s.connect((tgt_ip, tgt_port)); s.close()
-            logging.info("TCP probe OK at %s:%d", tgt_ip, tgt_port)
-            tcp_ok = True
-        except Exception as e:
-            logging.warning("TCP probe failed at %s:%d: %s", tgt_ip, tgt_port, e)
-            tcp_ok = False
-        # Step 3: adb connect (to refresh adb daemon state)
-        logging.info("adb connect %s:%d ...", tgt_ip, tgt_port)
-        try:
-            subprocess.run(["adb","connect",f"{tgt_ip}:{tgt_port}"],
-                           capture_output=True, text=True, timeout=5)
-        except Exception: pass
-        # Step 4: shell echo
-        logging.info("adb shell echo ok at %s:%d ...", tgt_ip, tgt_port)
-        try:
-            r = subprocess.run(["adb","-s",f"{tgt_ip}:{tgt_port}","shell","echo","ok"],
-                               capture_output=True, text=True, timeout=5)
-            shell_ok = "ok" in r.stdout
-            logging.info("shell echo: %s -> %r", shell_ok, r.stdout[:40])
-        except Exception as e:
-            shell_ok = False
-            logging.warning("shell echo error: %s", e)
-        # Step 5: decide
-        if not (tcp_ok and shell_ok):
-            logging.info("not reachable, running discover_phone …")
+
+        def _quick_shell(ip, port):
+            try:
+                r = subprocess.run(["adb","-s",f"{ip}:{port}","shell","echo","ok"],
+                                   capture_output=True, text=True, timeout=4)
+                return "ok" in r.stdout
+            except Exception:
+                return False
+
+        # Step 1: try the configured target first (no scan cost)
+        shell_ok = False
+        if tgt_ip:
+            logging.info("step1: try configured %s:%d", tgt_ip, tgt_port)
+            try:
+                subprocess.run(["adb","disconnect",f"{tgt_ip}:{tgt_port}"],
+                               capture_output=True, timeout=2)
+                time.sleep(0.3)
+                subprocess.run(["adb","connect",f"{tgt_ip}:{tgt_port}"],
+                               capture_output=True, text=True, timeout=6)
+            except Exception: pass
+            shell_ok = _quick_shell(tgt_ip, tgt_port)
+            logging.info("step1: configured target shell_ok=%s", shell_ok)
+
+        # Step 2: if configured target fails, run discover (resets adb, scans /24,
+        # skips gateway, retries each candidate 3x)
+        if not shell_ok:
+            logging.info("step2: running discover_phone (resets adb state)…")
             GLib.idle_add(self.status_row.set_subtitle,
-                          f"✗ unreachable at {tgt_ip}:{tgt_port} — searching…")
+                          "✗ unreachable — searching LAN…")
             ok2, msg2 = discover_phone(self.cfg)
-            logging.info("discover -> %s %s", ok2, msg2)
+            logging.info("step2: discover -> %s %s", ok2, msg2)
+            if not ok2:
+                # 3rd attempt: full adb-server restart + retry
+                logging.info("step3: adb kill-server + start-server, retry discover")
+                try: subprocess.run(["adb","kill-server"], capture_output=True, timeout=3)
+                except Exception: pass
+                time.sleep(2)
+                try: subprocess.run(["adb","start-server"], capture_output=True, timeout=4)
+                except Exception: pass
+                ok2, msg2 = discover_phone(self.cfg)
+                logging.info("step3: discover retry -> %s %s", ok2, msg2)
             if ok2:
                 self.refresh_cmd()
                 tgt_ip = self.cfg["android_ip"]
                 tgt_port = int(self.cfg["android_port"])
-                # re-shell echo
-                try:
-                    r = subprocess.run(["adb","-s",f"{tgt_ip}:{tgt_port}","shell","echo","ok"],
-                                       capture_output=True, text=True, timeout=5)
-                    shell_ok = "ok" in r.stdout
-                except Exception: shell_ok = False
+                shell_ok = _quick_shell(tgt_ip, tgt_port)
+                logging.info("step2/3: discovered target shell_ok=%s", shell_ok)
             else:
                 GLib.idle_add(self.status_row.set_subtitle, f"✗ {msg2[:80]}")
                 GLib.idle_add(self.toast, "Phone unreachable. Check WiFi / USB debugging.")
-                return
-        # Step 6: auto-start
+                logging.warning("auto-start aborted: %s", msg2)
+                return False
+
+        # Step 4: auto-start
         if shell_ok:
-            logging.info("auto-start: shell_ok=True, calling _start_proc")
+            logging.info("step4: auto-start scrcpy -> /dev/video0")
             GLib.idle_add(self.status_row.set_subtitle,
                           f"✓ reachable at {tgt_ip}:{tgt_port} — auto-start")
             GLib.idle_add(self.toast, "Auto-starting webcam…")
-            def go():
-                time.sleep(0.5)
-                logging.info("auto-start go() -> _start_proc")
-                GLib.idle_add(self._start_proc)
-            threading.Thread(target=go, daemon=True).start()
+            # call _start_proc DIRECTLY (no nested thread that can be killed
+            # by an early mainloop teardown).  _start_proc is fully GLib-safe.
+            GLib.idle_add(self._start_proc)
         else:
-            logging.warning("auto-start skipped: shell_ok=False")
-            GLib.idle_add(self.status_row.set_subtitle, f"✗ unreachable at {tgt_ip}:{tgt_port}")
+            logging.warning("step4: auto-start skipped: shell_ok=False")
+            GLib.idle_add(self.status_row.set_subtitle,
+                          f"✗ unreachable at {tgt_ip}:{tgt_port}")
         return False
 
     def refresh_cmd(self):
