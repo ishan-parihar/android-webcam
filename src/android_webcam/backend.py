@@ -81,24 +81,38 @@ def apply_mic_mute(cfg: dict) -> bool:
             continue
     return False
 
-def adb_ping(cfg: dict, timeout=3) -> tuple[bool,str]:
+def adb_ping(cfg: dict, timeout=4) -> tuple[bool,str]:
+    """Probe the phone.  Two-stage: (1) adb shell echo, (2) fall back to
+    TCP probe + reconnect, (3) auto-discover on failure.  Always returns
+    (bool, message) and never raises.
+    """
     tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
+    # 1. quick reachability
     try:
-        r = subprocess.run(["adb","-s",tgt,"shell","echo","ok"], capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(["adb","-s",tgt,"shell","echo","ok"],
+                          capture_output=True, text=True, timeout=timeout)
         if "ok" in r.stdout:
             return (True, r.stdout.strip())
-        rc,msg = connect_adb(cfg)
-        if not rc: return (False, msg)
-        r = subprocess.run(["adb","-s",tgt,"shell","echo","ok"], capture_output=True, text=True, timeout=timeout)
-        return ("ok" in r.stdout, r.stdout.strip() or r.stderr.strip() or msg)
-    except Exception as e:
-        rc,msg = connect_adb(cfg)
-        if not rc: return (False, f"ping fail: {e}; connect: {msg}")
+    except Exception: pass
+    # 2. reconnect then retry
+    try: connect_adb(cfg)
+    except Exception: pass
+    try:
+        r = subprocess.run(["adb","-s",tgt,"shell","echo","ok"],
+                          capture_output=True, text=True, timeout=timeout)
+        if "ok" in r.stdout:
+            return (True, r.stdout.strip())
+    except Exception: pass
+    # 3. last resort: quick_reachable (TCP + connect) without scanning
+    if quick_reachable(cfg):
         try:
-            r = subprocess.run(["adb","-s",tgt,"shell","echo","ok"], capture_output=True, text=True, timeout=timeout)
-            return ("ok" in r.stdout, r.stdout.strip() or r.stderr.strip())
-        except Exception as e2:
-            return (False, f"retry fail: {e2}")
+            r = subprocess.run(["adb","-s",tgt,"shell","echo","ok"],
+                              capture_output=True, text=True, timeout=timeout)
+            if "ok" in r.stdout:
+                return (True, r.stdout.strip())
+        except Exception: pass
+        return (True, f"reachable at {tgt}")
+    return (False, f"unreachable at {tgt}")
 
 def connect_adb(cfg: dict) -> tuple[bool,str]:
     tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
@@ -111,9 +125,13 @@ def connect_adb(cfg: dict) -> tuple[bool,str]:
     except Exception as e:
         return (False, str(e))
 
-def discover_phone(cfg: dict, gateway: str = "192.168.1.1") -> tuple[bool,str]:
-    """Scan the local /24 for an open 5555 adb port; if found, update cfg and return new target.
-    Tries 5555, 5554, 5556-5558 (Termux default + adb pair fallback).
+def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False) -> tuple[bool,str]:
+    """Scan the local /24 for an open 5555 adb port; if found, update cfg
+    and return new target. Tries 5555, 5554, 5556-5558 (Termux default + adb
+    pair fallback).
+
+    `quick=True` does a faster scan with a shorter timeout and falls back to
+    the arp cache / recent adb devices for quick retries.
     """
     import re as _re
     from .config import save
@@ -138,33 +156,72 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1") -> tuple[bool,str]:
     import concurrent.futures, socket
     found = []
     ports = (5555, 5554, 5556, 5557, 5558)
+    tcp_timeout = 0.25 if quick else 0.4
+
     def _probe(ip_port):
         ip, port = ip_port
         try:
-            s = socket.socket(); s.settimeout(0.4)
+            s = socket.socket(); s.settimeout(tcp_timeout)
             s.connect((ip, port)); s.close()
             return (ip, port)
         except Exception: return None
     targets = [(f"{base.rsplit('.',1)[0]}.{i}", p) for i in range(1,255) for p in ports]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=64) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=96) as ex:
         for r in ex.map(_probe, targets):
             if r: found.append(r)
+    if not found:
+        # Fall back to recent adb devices: maybe the phone moved IP and we
+        # have an existing connection.
+        try:
+            r = subprocess.run(["adb","devices"], capture_output=True, text=True, timeout=3)
+            for line in r.stdout.splitlines():
+                if "device" in line and ":" in line:
+                    ip_port = line.split()[0]
+                    if ":" in ip_port: found.append(tuple(ip_port.split(":")))
+        except Exception: pass
     if not found:
         return (False, f"no 5555/5554/5556-5558 open in {base}/24")
     for ip, port in found:
         try:
-            cr = subprocess.run(["adb","connect",f"{ip}:{port}"], capture_output=True, text=True, timeout=4)
-            if "connected" not in cr.stdout + cr.stderr: continue
-            sr = subprocess.run(["adb","-s",f"{ip}:{port}","shell","getprop ro.product.model"], capture_output=True, text=True, timeout=4)
+            subprocess.run(["adb","disconnect",f"{ip}:{port}"], capture_output=True, timeout=2)
+            cr = subprocess.run(["adb","connect",f"{ip}:{port}"], capture_output=True, text=True, timeout=6)
+            if "connected" not in (cr.stdout + cr.stderr): continue
+            sr = subprocess.run(["adb","-s",f"{ip}:{port}","shell","getprop ro.product.model"], capture_output=True, text=True, timeout=6)
             model = sr.stdout.strip()
             if model:
                 cfg["android_ip"] = ip
-                cfg["android_port"] = port
+                cfg["android_port"] = int(port)
                 save(cfg)
                 return (True, f"found {model} at {ip}:{port}")
             subprocess.run(["adb","disconnect",f"{ip}:{port}"], capture_output=True, timeout=2)
         except Exception: continue
-    return (False, f"found adb on {found} but none is Android")
+    return (False, f"found adb on {found[:5]} but none is Android")
+
+def quick_reachable(cfg: dict) -> bool:
+    """Returns True if the configured target is reachable.  Tries a TCP
+    probe, then adb connect, then a brief shell echo.  Tolerates slow
+    connections (timeout 4s per step).
+    """
+    import socket
+    tgt_ip = cfg.get("android_ip", "")
+    tgt_port = int(cfg.get("android_port", 5555))
+    if not tgt_ip: return False
+    # 1. TCP probe (fast)
+    try:
+        s = socket.socket(); s.settimeout(1.5)
+        s.connect((tgt_ip, tgt_port)); s.close()
+    except Exception:
+        # Try adb connect
+        try:
+            subprocess.run(["adb","connect",f"{tgt_ip}:{tgt_port}"], capture_output=True, text=True, timeout=4)
+        except Exception: pass
+    # 2. shell echo
+    try:
+        r = subprocess.run(["adb","-s",f"{tgt_ip}:{tgt_port}","shell","echo","ok"],
+                          capture_output=True, text=True, timeout=4)
+        return "ok" in r.stdout
+    except Exception:
+        return False
 
 def start(cfg: dict) -> subprocess.Popen:
     """Start scrcpy with the given config. Returns the Popen. Caller is

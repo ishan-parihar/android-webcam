@@ -2,7 +2,7 @@
 import gi
 gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")
 from gi.repository import Gtk, Adw, GLib, Gio
-import subprocess, threading, shlex, os
+import subprocess, threading, shlex, os, time
 from pathlib import Path
 from .config import load, save, SIZES, FPS_CHOICES
 from .backend import build_argv, adb_ping, connect_adb
@@ -18,8 +18,9 @@ class App(Adw.Application):
         self.connect("activate", self.on_activate)
 
     def on_activate(self, app):
-        self.win = Adw.ApplicationWindow(application=app, title="Android Webcam", default_width=520, default_height=680)
-        # Toast overlay + ToolbarView for Adw header
+        self.win = Adw.ApplicationWindow(application=app, title="Android Webcam", default_width=560, default_height=720)
+        # Make the window content scrollable so all options are reachable on a
+        # cramped screen.  Adwaita PreferencesGroup works inside Gtk.ScrolledWindow.
         self.toast_overlay = Adw.ToastOverlay()
         tv = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -28,9 +29,17 @@ class App(Adw.Application):
         self.win.set_content(tv)
         self.header = header
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        box.set_margin_top(12); box.set_margin_bottom(12); box.set_margin_start(12); box.set_margin_end(12)
-        self.toast_overlay.set_child(box)
+        # Outer: scroller + scrollable content so the page works on small windows
+        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                      vscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+                                      vexpand=True, hexpand=True)
+        scroller.set_propagate_natural_height(True)
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        content_box.set_margin_top(12); content_box.set_margin_bottom(12)
+        content_box.set_margin_start(12); content_box.set_margin_end(12)
+        scroller.set_child(content_box)
+        self.toast_overlay.set_child(scroller)
+        box = content_box
 
         # Status row
         self.status_row = Adw.ActionRow(title="Status", subtitle="Idle — /dev/video0 free")
@@ -154,12 +163,41 @@ class App(Adw.Application):
         about.connect("clicked", lambda *_: self.show_about())
         self.header.pack_end(about)
         self.win.present()
-        # initial ping
-        GLib.idle_add(self.on_ping, None)
+        # initial ping + auto-start: run on the GLib main loop, no user click
+        GLib.idle_add(self._on_startup)
 
     # handlers
     def toast(self, msg: str):
         self.toast_overlay.add_toast(Adw.Toast.new(msg))
+
+    def _on_startup(self):
+        """Initial boot: ping phone → if unreachable, run --discover → re-ping
+        → if reachable, immediately auto-start streaming.  Runs once on
+        startup, no user click required.
+        """
+        def bg():
+            from .backend import adb_ping, discover_phone
+            ok, msg = adb_ping(self.cfg)
+            if not ok:
+                GLib.idle_add(self.status_row.set_subtitle, f"✗ {msg[:60]} — searching…")
+                ok2, msg2 = discover_phone(self.cfg)
+                if ok2:
+                    self.refresh_cmd()
+                    GLib.idle_add(self.status_row.set_subtitle, f"✓ {msg2[:80]}")
+                    ok, msg = adb_ping(self.cfg)
+            if ok:
+                GLib.idle_add(self.status_row.set_subtitle, f"✓ {msg[:60]} — auto-start")
+                GLib.idle_add(self.toast, "Auto-starting webcam…")
+                # small delay so the user sees the status transition
+                def go():
+                    time.sleep(0.5)
+                    GLib.idle_add(self._start_proc)
+                threading.Thread(target=go, daemon=True).start()
+            else:
+                GLib.idle_add(self.status_row.set_subtitle, f"✗ {msg[:80]}")
+                GLib.idle_add(self.toast, "Phone unreachable. Check WiFi / USB debugging.")
+        threading.Thread(target=bg, daemon=True).start()
+        return False
 
     def refresh_cmd(self):
         argv = build_argv(self.cfg)
