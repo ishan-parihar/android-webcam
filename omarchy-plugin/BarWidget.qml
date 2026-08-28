@@ -22,7 +22,10 @@ Panel {
   }
   Timer { interval: 3000; running: true; repeat: true; triggeredOnStart: true; onTriggered: if (!statusProc.running) statusProc.running = true }
 
-  Process { id: launchProc; command: ["android-webcam"] }
+  // Launch via setsid -f so the process is fully detached from Quickshell's
+  // process group.  When Quickshell restarts (monitor change, theme reload,
+  // etc.) the webcam must keep running, so we can't be a child of QML.
+  Process { id: launchProc; command: ["setsid","-f","android-webcam"] }
   Process { id: stopProc; command: ["bash","-c","pkill -f 'scrcpy.*camera.*v4l2-sink' ; echo stopped"] ; stdout: StdioCollector { onStreamFinished: statusProc.running = true } }
 
   BarIconButton {

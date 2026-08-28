@@ -34,6 +34,15 @@ class App(Adw.Application):
         self.connect("activate", self.on_activate)
 
     def on_activate(self, app):
+        try:
+            self._on_activate_inner(app)
+        except Exception as e:
+            logging.exception("on_activate failed: %s", e)
+            try:
+                self.toast(f"Startup error: {e}")
+            except Exception: pass
+
+    def _on_activate_inner(self, app):
         self.win = Adw.ApplicationWindow(application=app, title="Android Webcam", default_width=560, default_height=720)
         # Make the window content scrollable so all options are reachable on a
         # cramped screen.  Adwaita PreferencesGroup works inside Gtk.ScrolledWindow.
@@ -385,40 +394,88 @@ class App(Adw.Application):
     def _start_proc(self):
         from . import backend as _b
         argv = _b.build_argv(self.cfg)
+        # Reset the v4l2 sink device — if a previous scrcpy held it open or
+        # the format is stale, the new scrcpy will fail to bind.  Best-effort
+        # via v4l2-ctl: just clear the format.  v4l2loopback-000 is reset by
+        # closing+reopening; that happens automatically when scrcpy re-opens
+        # the device, so we don't need to do anything here.
         try:
             # ensure connection before launching
-            try: subprocess.run(["adb","connect",f"{self.cfg['android_ip']}:{self.cfg['android_port']}"], capture_output=True, text=True, timeout=5)
-            except Exception: pass
-            self.proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            subprocess.run(["adb","connect",f"{self.cfg['android_ip']}:{self.cfg['android_port']}"],
+                           capture_output=True, text=True, timeout=5)
+        except Exception as e:
+            logging.warning("pre-start adb connect: %s", e)
+        # CRITICAL: fully detach scrcpy from this process group so the GUI's
+        # own lifecycle (Quickshell, hyprland reload, parent reaping) can
+        # never accidentally kill scrcpy.  We use start_new_session=True
+        # (POSIX setsid) so scrcpy becomes its own session leader.
+        try:
+            self.proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+                start_new_session=True,  # detach from GUI's pgid
+            )
         except FileNotFoundError:
             self.toast("scrcpy not found — pacman -S scrcpy"); return
+        except Exception as e:
+            logging.exception("scrcpy launch failed: %s", e)
+            self.toast(f"Launch failed: {e}")
+            return
         self.start_btn.set_label("Running…"); self.start_btn.set_visible(False)
         self.stop_btn.set_visible(True)
         self.status_row.set_subtitle(f"● Streaming {self.cfg['camera_facing']} {self.cfg['resolution']} → {self.cfg['v4l2_sink']}")
         self.status_icon.set_from_icon_name("media-record-symbolic")
         self.log_buf.set_text("")
+        # Tail scrcpy's stdout into the log buffer AND log file.  Wrapped in
+        # try/except so a reader thread crash can never take down the GUI.
         def reader():
-            for line in self.proc.stdout:  # type: ignore
-                GLib.idle_add(lambda l=line: self.log_buf.insert(self.log_buf.get_end_iter(), l))
-            GLib.idle_add(lambda: self.on_proc_exit())
-        threading.Thread(target=reader,daemon=True).start()
+            try:
+                assert self.proc and self.proc.stdout
+                for line in self.proc.stdout:
+                    try:
+                        GLib.idle_add(self._append_log, line)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logging.warning("scrcpy reader error: %s", e)
+            finally:
+                try:
+                    GLib.idle_add(self.on_proc_exit)
+                except Exception:
+                    pass
+        threading.Thread(target=reader, daemon=True, name="scrcpy-reader").start()
         # mic: promote scrcpy to system default source (so all apps pick it up)
         # and apply mute flag (echo protection).  Restore previous default on stop.
         if self.cfg.get("mic_to_host", True):
             def _mic_default():
                 time.sleep(2)  # wait for scrcpy to register PipeWire source
-                prev = _b.set_phone_as_system_mic(self.cfg)
-                self.cfg["_mic_prev"] = prev
-                if prev.get("set"):
-                    state = "muted" if self.cfg.get("mic_mute") else "live"
-                    GLib.idle_add(lambda: self.log_buf.insert(
-                        self.log_buf.get_end_iter(),
-                        f"[mic] scrcpy is system default mic ({state})\n"))
-            threading.Thread(target=_mic_default, daemon=True).start()
+                try:
+                    prev = _b.set_phone_as_system_mic(self.cfg)
+                    self.cfg["_mic_prev"] = prev
+                    if prev.get("set"):
+                        state = "muted" if self.cfg.get("mic_mute") else "live"
+                        GLib.idle_add(self._append_log,
+                                      f"[mic] scrcpy is system default mic ({state})\n")
+                except Exception as e:
+                    logging.warning("mic default promotion failed: %s", e)
+            threading.Thread(target=_mic_default, daemon=True, name="mic-default").start()
         # auto-rotate watcher
         if self.cfg.get("auto_rotate", True):
-            self._start_rotator()
+            try:
+                self._start_rotator()
+            except Exception as e:
+                logging.warning("rotator start failed: %s", e)
         self.toast(f"Started {self.cfg['camera_facing']} {self.cfg.get('custom_size') or SIZES[self.cfg['resolution']]} → {self.cfg['v4l2_sink']}")
+        logging.info("scrcpy launched, pid=%s argv=%s", self.proc.pid, " ".join(argv))
+
+    def _append_log(self, line: str):
+        """GLib-safe log append — catches every exception so the GUI never dies
+        from a log-buffer error."""
+        try:
+            self.log_buf.insert(self.log_buf.get_end_iter(), line)
+        except Exception:
+            pass
 
     def _start_rotator(self):
         from . import rotation
