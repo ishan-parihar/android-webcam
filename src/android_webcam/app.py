@@ -225,10 +225,15 @@ class App(Adw.Application):
         logging.info("status: [%s] %s", icon, subtitle)
 
     def _startup_worker(self):
-        """Background thread: probe → discover → auto-start.  Posts status
-        updates back to the main loop.  Waits for the adb per-device auth
-        handshake to finish before issuing `adb shell` (fixes the GUI-vs-CLI
-        parity bug where the first shell call after connect always times out).
+        """Background thread: probe → discover → auto-start.
+
+        GUI-vs-CLI parity fix: the CLI just runs `scrcpy --tcpip=IP:PORT ...`
+        and lets scrcpy handle adb internally. The old GUI did a fragile
+        `adb disconnect` → `adb connect` → `get-state` → `shell echo` dance
+        that broke whenever the phone was briefly asleep or adbNeeded auth.
+        This version mirrors what the CLI does: optimistic shell probe
+        first (no disconnect), then connect+wait only if needed, with
+        retries.  Discover is last-resort, not first failure.
         """
         import time as _t
         tgt_ip = self.cfg.get("android_ip")
@@ -237,42 +242,65 @@ class App(Adw.Application):
 
         def try_target(ip, port, why):
             """Try to verify one IP:port is actually responsive.
-            Returns True on success and updates cfg."""
+            Returns True on success and updates cfg.
+
+            Optimistic: try `shell echo` WITHOUT disconnect/connect first
+            (covers the case where adb already has a live 'device' connection).
+            Only if that fails do we do the heavier connect+wait dance.
+            This matches what `scrcpy --tcpip` does internally and is why
+            the CLI "always works" while the old GUI forced a reconnect.
+            """
             logging.info("trying %s:%d (%s)", ip, port, why)
             GLib.idle_add(self._set_status, f"Connecting to {ip}:{port}…", "search")
-            try:
-                subprocess.run(["adb","disconnect",f"{ip}:{port}"],
-                               capture_output=True, timeout=2)
-            except Exception: pass
-            _t.sleep(0.3)
-            try:
-                cr = subprocess.run(["adb","connect",f"{ip}:{port}"],
-                                    capture_output=True, text=True, timeout=8)
-                logging.info("adb connect -> %r", (cr.stdout+cr.stderr).strip())
-            except Exception as e:
-                logging.warning("adb connect error: %s", e)
-            # wait for auth handshake to complete — the difference between
-            # CLI (which has human delay) and GUI (which fires shell
-            # immediately and times out).
-            ready = _wait_device_ready(ip, port, timeout=5.0)
-            if not ready:
-                logging.warning("device not ready after connect: %s:%d", ip, port)
-                return False
-            shell_ok = _adb_shell_echo(ip, port, timeout=4.0)
-            if not shell_ok:
-                logging.warning("shell echo failed: %s:%d", ip, port)
-                return False
-            self.cfg["android_ip"] = ip
-            self.cfg["android_port"] = port
-            from .config import save
-            save(self.cfg)
-            return True
+            # 1) optimistic: is the device already in 'device' state?
+            if _wait_device_ready(ip, port, timeout=1.0) and _adb_shell_echo(ip, port, timeout=3.0):
+                logging.info("try_target %s:%d (%s): already ready, no connect needed", ip, port, why)
+                self.cfg["android_ip"] = ip
+                self.cfg["android_port"] = port
+                from .config import save
+                save(self.cfg)
+                return True
+            # 2) need to (re)connect — but DON'T disconnect first (that kills
+            # an existing good connection and forces re-auth). Just connect.
+            for attempt in range(2):
+                try:
+                    cr = subprocess.run(["adb","connect",f"{ip}:{port}"],
+                                        capture_output=True, text=True, timeout=8)
+                    out = (cr.stdout+cr.stderr).strip()
+                    logging.info("adb connect %s:%d attempt %d -> %r", ip, port, attempt+1, out)
+                except Exception as e:
+                    logging.warning("adb connect error %s:%d attempt %d: %s", ip, port, attempt+1, e)
+                    _t.sleep(0.8)
+                    continue
+                # wait for auth handshake — the CLI has human delay, GUI doesn't
+                ready = _wait_device_ready(ip, port, timeout=6.0)
+                if not ready:
+                    logging.warning("device not ready after connect: %s:%d attempt %d", ip, port, attempt+1)
+                    _t.sleep(0.8)
+                    continue
+                if _adb_shell_echo(ip, port, timeout=4.0):
+                    logging.info("try_target %s:%d (%s): ready after connect", ip, port, why)
+                    self.cfg["android_ip"] = ip
+                    self.cfg["android_port"] = port
+                    from .config import save
+                    save(self.cfg)
+                    return True
+                logging.warning("shell echo failed: %s:%d attempt %d", ip, port, attempt+1)
+                _t.sleep(0.8)
+            return False
 
-        # 1) try the configured target
-        if tgt_ip:
-            shell_ok = try_target(tgt_ip, tgt_port, "configured")
+        # 1) try the configured target (with 1 retry after 1.5s — phone may be
+        # waking from doze and needs a moment for adbd to start listening)
+        for attempt in range(2):
+            if tgt_ip and try_target(tgt_ip, tgt_port, f"configured try {attempt+1}/2"):
+                shell_ok = True
+                break
+            if attempt == 0:
+                logging.info("configured target failed, waiting 1.5s and retrying…")
+                GLib.idle_add(self._set_status, f"Retrying {tgt_ip}:{tgt_port}…", "search")
+                _t.sleep(1.5)
 
-        # 2) discover on failure
+        # 2) discover on failure — but only if we haven't already succeeded
         if not shell_ok:
             logging.info("discover_phone (thread)…")
             GLib.idle_add(self._set_status, "Searching LAN for phone…", "search")
@@ -283,21 +311,39 @@ class App(Adw.Application):
                 tgt_port = int(self.cfg["android_port"])
                 GLib.idle_add(self.refresh_cmd)
                 shell_ok = try_target(tgt_ip, tgt_port, "discovered")
+            else:
+                # discover found nothing — phone may have just changed IP and
+                # our TCP scan missed it (0.4s timeout too short for dozing
+                # phone). Retry discover once after 2s.
+                logging.info("discover found nothing, retrying in 2s…")
+                GLib.idle_add(self._set_status, "Phone not found, retrying scan…", "search")
+                _t.sleep(2.0)
+                ok2, msg2 = discover_phone(self.cfg)
+                logging.info("discover retry -> %s %s", ok2, msg2)
+                if ok2:
+                    tgt_ip = self.cfg["android_ip"]
+                    tgt_port = int(self.cfg["android_port"])
+                    GLib.idle_add(self.refresh_cmd)
+                    shell_ok = try_target(tgt_ip, tgt_port, "discovered retry")
 
-        # 3) decide
+        # 3) decide — even if shell_ok is False, we still want to give the
+        # user a useful error that matches what the CLI would show (scrcpy's
+        # own "failed to connect" is more helpful than our generic message).
+        # But we don't auto-launch scrcpy when the phone is definitely not
+        # there (that would just show a blank error). So we keep the abort
+        # but make the message actionable.
         if shell_ok:
             logging.info("auto-start -> /dev/video0")
             GLib.idle_add(self._set_status,
-                          f"✓ {tgt_ip}:{tgt_port} — auto-starting webcam…", "ok")
-            GLib.idle_add(self.toast, "Auto-starting webcam…")
-            # give the UI a beat to repaint
+                          f"\u2713 {tgt_ip}:{tgt_port} \u2014 auto-starting webcam\u2026", "ok")
+            GLib.idle_add(self.toast, "Auto-starting webcam\u2026")
             _t.sleep(0.4)
             GLib.idle_add(self._start_proc)
         else:
-            logging.warning("auto-start aborted: phone unreachable")
+            logging.warning("auto-start aborted: phone unreachable after retries")
             GLib.idle_add(self._set_status,
-                          f"✗ unreachable — press Connect or check WiFi", "bad")
-            GLib.idle_add(self.toast, "Phone unreachable. Press Connect to retry.")
+                          f"\u2717 unreachable at {tgt_ip}:{tgt_port} \u2014 press Connect", "bad")
+            GLib.idle_add(self.toast, "Phone unreachable. Press Connect to retry or check WiFi/adb.")
 
     def refresh_cmd(self):
         argv = build_argv(self.cfg)
