@@ -440,27 +440,34 @@ class App(Adw.Application):
     def _start_proc(self):
         from . import backend as _b
         argv = _b.build_argv(self.cfg)
-        # Reset the v4l2 sink device — if a previous scrcpy held it open or
-        # the format is stale, the new scrcpy will fail to bind.  Best-effort
-        # via v4l2-ctl: just clear the format.  v4l2loopback-000 is reset by
-        # closing+reopening; that happens automatically when scrcpy re-opens
-        # the device, so we don't need to do anything here.
+        # Ensure v4l2loopback device exists (was removed as dep of iriun)
+        if not _b.ensure_v4l2loopback():
+            msg = "/dev/video0 missing — v4l2loopback not loaded. Run: sudo modprobe v4l2loopback card_label='Android Webcam' exclusive_caps=1 video_nr=0"
+            logging.error(msg)
+            self.toast(msg)
+            GLib.idle_add(self._set_status, "✗ /dev/video0 missing — see log", "bad")
+            return
+        # For mic -> system without echo, route to null sink
+        use_null_sink = bool(self.cfg.get("mic_to_host", True)) and not bool(self.cfg.get("mic_to_phone", False))
+        if use_null_sink:
+            _b.ensure_null_sink()
         try:
-            # ensure connection before launching
             subprocess.run(["adb","connect",f"{self.cfg['android_ip']}:{self.cfg['android_port']}"],
                            capture_output=True, text=True, timeout=5)
         except Exception as e:
             logging.warning("pre-start adb connect: %s", e)
-        # CRITICAL: fully detach scrcpy from this process group so the GUI's
-        # own lifecycle (Quickshell, hyprland reload, parent reaping) can
-        # never accidentally kill scrcpy.  We use start_new_session=True
-        # (POSIX setsid) so scrcpy becomes its own session leader.
+        env = None
+        if use_null_sink:
+            env = os.environ.copy()
+            env["PULSE_SINK"] = _b.NULL_SINK
+            env["PIPEWIRE_SINK"] = _b.NULL_SINK
         try:
             self.proc = subprocess.Popen(
                 argv,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
-                start_new_session=True,  # detach from GUI's pgid
+                start_new_session=True,
+                env=env,
             )
         except FileNotFoundError:
             self.toast("scrcpy not found — pacman -S scrcpy"); return

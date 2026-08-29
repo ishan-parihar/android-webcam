@@ -6,22 +6,74 @@ from .config import SIZES, load, save, target
 def scrcpy_exists() -> bool: return shutil.which("scrcpy") is not None
 def adb_exists() -> bool: return shutil.which("adb") is not None
 
+NULL_SINK = "scrcpy_mic"
+NULL_MONITOR = "scrcpy_mic.monitor"
+
+def ensure_null_sink() -> bool:
+    """Create a PipeWire/Pulse null sink for phone mic without echo.
+
+    scrcpy --audio-source=mic sends mic audio to the default sink (HDMI)
+    as a playback stream, causing echo.  Routing it to a null sink and
+    exposing the null sink's monitor as a source gives us a real mic
+    without speakers.  Returns True if sink is ready.
+    """
+    try:
+        r = subprocess.run(["pactl","list","short","sinks"], capture_output=True, text=True, timeout=3)
+        if NULL_SINK in r.stdout:
+            return True
+        r = subprocess.run(["pactl","load-module","module-null-sink",
+                            f"sink_name={NULL_SINK}",
+                            "sink_properties=device.description='PhoneMic_scrcpy'"],
+                           capture_output=True, text=True, timeout=5)
+        return r.returncode == 0 or NULL_SINK in r.stdout
+    except Exception:
+        return False
+
+def remove_null_sink() -> None:
+    try:
+        r = subprocess.run(["pactl","list","short","modules"], capture_output=True, text=True, timeout=3)
+        for line in r.stdout.splitlines():
+            if "module-null-sink" in line and NULL_SINK in line:
+                mod_id = line.split()[0]
+                subprocess.run(["pactl","unload-module",mod_id], capture_output=True, timeout=3)
+    except Exception: pass
+
+def ensure_v4l2loopback() -> bool:
+    """Ensure /dev/video0 exists; try to load v4l2loopback if missing.
+    Returns True if device exists after attempt.
+    """
+    if Path("/dev/video0").exists():
+        return True
+    try:
+        # Try to load module (was removed as dep of iriun)
+        subprocess.run(["sudo","modprobe","v4l2loopback",
+                        "card_label=Android Webcam","exclusive_caps=1","video_nr=0"],
+                       capture_output=True, timeout=5)
+        time.sleep(0.5)
+        # Fix perms if needed (udev should do this, but be safe)
+        if Path("/dev/video0").exists():
+            try:
+                subprocess.run(["sudo","chgrp","video","/dev/video0"], capture_output=True, timeout=2)
+                subprocess.run(["sudo","chmod","660","/dev/video0"], capture_output=True, timeout=2)
+            except Exception: pass
+            return True
+    except Exception: pass
+    return Path("/dev/video0").exists()
+
 def build_argv(cfg: dict, extra: list | None = None) -> list[str]:
     """Compose scrcpy argv.
 
     Audio model (two independent flags):
-      mic_to_host  (default ON)  -> --audio-source=mic
-                                   + --no-audio-playback (no echo!)
+      mic_to_host  (default ON)  -> --audio-source=mic  (to null sink, no echo)
       mic_to_phone (default OFF) -> --audio-source=playback --audio-dup
-                                    (host audio -> phone speakers; use phone
-                                     as a remote speakerphone)
-      mic_mute     (default False) -> pactl set-source-mute scrcpy 1 after start
-      mic_default  (default True)  -> pactl set-default-source scrcpy after start
+                                     (host audio -> phone speakers; use phone
+                                      as a remote speakerphone)
+      mic_mute     (default False) -> pactl set-source-mute on null monitor
+      mic_default  (default True)  -> pactl set-default-source null monitor
 
-    Critical: --no-audio-playback MUST be added when mic_to_host is on and
-    mic_to_phone is off.  Without it, scrcpy plays the captured phone mic
-    through the host's default sink (HDMI speakers) creating an infinite
-    echo loop.  See issue: "My speakers are still routing the phone's mic".
+    Phone mic is routed to a null sink (scrcpy_mic) via PULSE_SINK env in
+    start(), so it never hits HDMI speakers.  The null sink's monitor
+    (scrcpy_mic.monitor) becomes the system mic.
     """
     tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
     size = cfg.get("custom_size") or SIZES.get(cfg.get("resolution","1080p"), "1920x1080")
@@ -35,33 +87,21 @@ def build_argv(cfg: dict, extra: list | None = None) -> list[str]:
     argv += [f"--camera-size={size}", f"--camera-fps={cfg.get('fps',30)}"]
     if cfg.get("torch"): argv.append("--camera-torch")
     if cfg.get("auto_rotate"):
-        # user-controlled orientation; can be overridden by start() with live
-        # rotation from the rotator thread.
         argv += ["--orientation=0"]
     argv += [f"--v4l2-sink={cfg.get('v4l2_sink','/dev/video0')}", f"--v4l2-buffer={cfg.get('v4l2_buffer',120)}"]
     if cfg.get("video_bit_rate"): argv += [f"--video-bit-rate={cfg['video_bit_rate']}"]
     if not cfg.get("with_preview"): argv.append("--no-window")
 
-    # Audio: two-flag composition (mutually exclusive combos)
     mic_to_host = bool(cfg.get("mic_to_host", True))
     mic_to_phone = bool(cfg.get("mic_to_phone", False))
     if mic_to_host and not mic_to_phone:
-        # Default: phone mic -> host as PipeWire source for apps to use.
-        # --no-audio-playback prevents scrcpy from playing the mic through
-        # the host's default sink (HDMI speakers), which is what causes
-        # the infinite echo.  Apps pull from the 'scrcpy' source as normal.
-        argv += [
-            f"--audio-source={cfg.get('audio_source','mic')}",
-            "--no-audio-playback",
-        ]
+        # Default: phone mic -> null sink (no echo), monitor becomes mic
+        argv += [f"--audio-source={cfg.get('audio_source','mic')}"]
     elif mic_to_host and mic_to_phone:
-        # phone mic -> host AND host audio -> phone (full duplex, echo risk)
         argv += [f"--audio-source={cfg.get('audio_source','mic')}", "--audio-dup"]
     elif not mic_to_host and mic_to_phone:
-        # "Speakerphone" mode: host audio -> phone speakers, no mic forwarding
         argv += ["--audio-source=playback", "--audio-dup"]
     else:
-        # neither
         argv.append("--no-audio")
 
     if extra: argv += extra
@@ -90,50 +130,90 @@ def apply_mic_mute(cfg: dict) -> bool:
     return False
 
 
+def _move_scrcpy_to_null_sink() -> bool:
+    """Find scrcpy's sink-input and move it to the null sink.
+    Returns True if moved or already on null sink.
+    """
+    for _ in range(8):  # poll up to 4s
+        try:
+            r = subprocess.run(["pactl","list","sink-inputs"], capture_output=True, text=True, timeout=3)
+            out = r.stdout
+            # Parse: Sink Input #<idx> ... application.name = "scrcpy"
+            # Find blocks containing scrcpy
+            if "application.name = \"scrcpy\"" in out:
+                # Extract idx for scrcpy block
+                import re as _re
+                # Find all "Sink Input #<idx>" that precede a scrcpy block
+                # Simplest: iterate lines, track current idx
+                current_idx = None
+                for line in out.splitlines():
+                    m = _re.match(r"Sink Input #(\d+)", line)
+                    if m:
+                        current_idx = m.group(1)
+                    if current_idx and "application.name = \"scrcpy\"" in line:
+                        # Found scrcpy's sink-input
+                        # Check if already on null sink
+                        # Look ahead for "Sink: <id>" and map id to name via short list
+                        rs = subprocess.run(["pactl","list","short","sink-inputs"], capture_output=True, text=True, timeout=3)
+                        for l in rs.stdout.splitlines():
+                            if l.startswith(current_idx + "\t") or l.startswith(current_idx + " "):
+                                parts = l.split()
+                                if len(parts) >= 2:
+                                    sink_id = parts[1]
+                                    # Resolve sink_id to name
+                                    rn = subprocess.run(["pactl","list","short","sinks"], capture_output=True, text=True, timeout=3)
+                                    for sl in rn.stdout.splitlines():
+                                        if sl.startswith(sink_id + "\t") and NULL_SINK in sl:
+                                            return True  # already on null sink
+                                # Move it
+                                mr = subprocess.run(["pactl","move-sink-input", current_idx, NULL_SINK], capture_output=True, text=True, timeout=3)
+                                return mr.returncode == 0
+                        current_idx = None
+        except Exception: pass
+        time.sleep(0.5)
+    return False
+
 def set_phone_as_system_mic(cfg: dict) -> dict:
     """Make the forwarded phone mic the system default input source.
 
-    Returns a dict with the previous default source info so it can be
-    restored on stop.  No-op if mic_to_host is off.
-
-    Without this, the scrcpy source appears in apps' input picker but apps
-    default to whatever the system default was before (often a monitor
-    source or nothing).  This is the difference between "you can pick it
-    manually in each app" and "your system mic is just the phone".
+    With the null-sink model, the mic lives at scrcpy_mic.monitor.
+    Steps: 1) move scrcpy sink-input to null sink (no echo),
+           2) set null monitor as default source.
     """
     info = {"prev_default_source": None, "prev_default_mute": None, "set": False}
     if not cfg.get("mic_to_host", True):
         return info
-    # Wait briefly for scrcpy to register the source
-    time.sleep(2.0)
-    # 1) capture previous default
+    time.sleep(1.5)  # wait for scrcpy to create sink-input
+    # 1) Move scrcpy audio from HDMI to null sink (prevents echo)
+    _move_scrcpy_to_null_sink()
+    time.sleep(0.5)
     try:
         r = subprocess.run(["pactl","get-default-source"], capture_output=True, text=True, timeout=3)
         if r.returncode == 0:
             info["prev_default_source"] = r.stdout.strip()
-            # also capture its mute state so we can restore it
             r2 = subprocess.run(["pactl","get-source-mute", info["prev_default_source"]],
                                  capture_output=True, text=True, timeout=3)
             info["prev_default_mute"] = "yes" in r2.stdout.lower() if r2.returncode == 0 else None
     except Exception: pass
-    # 2) set scrcpy as default + unmuted (or muted if mic_mute flag is on)
     want_mute = "1" if cfg.get("mic_mute", False) else "0"
-    for cmd in (
-        ["pactl", "set-default-source", "scrcpy"],
-        ["pactl", "set-source-mute", "scrcpy", want_mute],
-    ):
+    # Prefer null sink monitor, fall back to legacy "scrcpy" source
+    for src in (NULL_MONITOR, "scrcpy"):
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
-            if r.returncode != 0:
-                # 'No such entity' if the scrcpy source isn't yet registered.
-                # wpctl fallback for WirePlumber:
-                if "scrcpy" in cmd[1:]:
-                    try:
-                        subprocess.run(["wpctl","set-default","scrcpy"], capture_output=True, timeout=3)
-                    except Exception: pass
-        except FileNotFoundError: continue
+            r = subprocess.run(["pactl","set-default-source",src], capture_output=True, text=True, timeout=3)
+            if r.returncode == 0:
+                subprocess.run(["pactl","set-source-mute",src,want_mute], capture_output=True, timeout=3)
+                info["set"] = True
+                info["mic_source"] = src
+                return info
         except Exception: continue
-    info["set"] = True
+    # wpctl fallback
+    for src in (NULL_MONITOR, "scrcpy"):
+        try:
+            subprocess.run(["wpctl","set-default",src], capture_output=True, timeout=3)
+            info["set"] = True
+            info["mic_source"] = src
+            return info
+        except Exception: continue
     return info
 
 
@@ -381,13 +461,18 @@ def quick_reachable(cfg: dict) -> bool:
         return False
 
 def start(cfg: dict) -> subprocess.Popen:
-    """Start scrcpy with the given config. Returns the Popen. Caller is
-    responsible for the process lifecycle. If cfg['auto_rotate'] is True and
-    Hyprland reports an active scrcpy window whose aspect changes, the
-    caller can use rotation.start_rotator() to re-launch.
-    """
+    """Start scrcpy with the given config. Returns the Popen."""
     argv = build_argv(cfg)
     tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
+    # Ensure v4l2loopback device exists (was removed as dep of iriun)
+    if not ensure_v4l2loopback():
+        raise RuntimeError("/dev/video0 missing — v4l2loopback not loaded. Reinstall v4l2loopback-dkms and modprobe.")
+    # For mic -> system without echo, route scrcpy audio to a null sink
+    mic_to_host = bool(cfg.get("mic_to_host", True))
+    mic_to_phone = bool(cfg.get("mic_to_phone", False))
+    use_null_sink = mic_to_host and not mic_to_phone
+    if use_null_sink:
+        ensure_null_sink()
     try:
         subprocess.run(["adb","connect",tgt], capture_output=True, text=True, timeout=5)
     except Exception: pass
@@ -397,8 +482,13 @@ def start(cfg: dict) -> subprocess.Popen:
                             "settings put system screen_brightness_mode 0; settings put system screen_brightness 1; cmd display set-brightness 0.001"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
         except Exception: pass
-    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    # Promote phone mic to system default source (so all apps pick it up)
+    env = None
+    if use_null_sink:
+        env = os.environ.copy()
+        env["PULSE_SINK"] = NULL_SINK
+        # Also set for PipeWire-native clients that respect it
+        env["PIPEWIRE_SINK"] = NULL_SINK
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
     if cfg.get("mic_to_host", True) and cfg.get("mic_default", True):
         def _delay_default():
             prev = set_phone_as_system_mic(cfg)
@@ -406,9 +496,8 @@ def start(cfg: dict) -> subprocess.Popen:
         threading_mod = __import__("threading")
         threading_mod.Thread(target=_delay_default, daemon=True).start()
     elif cfg.get("mic_to_host", True) and cfg.get("mic_mute", True):
-        # Legacy: only mute, don't promote (kept for compatibility)
         def _delay_mute():
-            time.sleep(2)  # wait for scrcpy to register the PipeWire source
+            time.sleep(2)
             apply_mic_mute(cfg)
         threading_mod = __import__("threading")
         threading_mod.Thread(target=_delay_mute, daemon=True).start()
