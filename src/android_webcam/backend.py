@@ -187,25 +187,57 @@ def _move_scrcpy_to_null_sink() -> bool:
         time.sleep(0.5)
     return moved_any
 
+def _find_real_source() -> str | None:
+    """Return first non-monitor, non-scrcpy input source name, or None."""
+    try:
+        r = subprocess.run(["pactl","list","short","sources"], capture_output=True, text=True, timeout=3)
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 2: continue
+            name = parts[1]
+            if ".monitor" in name: continue
+            if "scrcpy" in name: continue
+            return name
+    except Exception: pass
+    return None
+
 def set_phone_as_system_mic(cfg: dict) -> dict:
     """Make the forwarded phone mic the system default input source.
 
     With the null-sink model, the mic lives at scrcpy_mic.monitor.
     Steps: 1) move scrcpy sink-input to null sink (no echo),
            2) set null monitor as default source.
+    Guards: if prev is already scrcpy/null, or scrcpy not running, do not
+    clobber real prev; this prevents the sticky scrcpy_mic.monitor loop.
     """
     info = {"prev_default_source": None, "prev_default_mute": None, "set": False}
     if not cfg.get("mic_to_host", True):
+        return info
+    if not cfg.get("mic_default", True):
         return info
     time.sleep(1.5)  # wait for scrcpy to create sink-input
     # 1) Move scrcpy audio from HDMI to null sink (prevents echo)
     _move_scrcpy_to_null_sink()
     time.sleep(0.5)
+    # verify scrcpy actually produced a stream; if dead, don't hijack source
+    try:
+        r = subprocess.run(["pactl","list","sink-inputs"], capture_output=True, text=True, timeout=3)
+        if "application.name = \"scrcpy\"" not in r.stdout:
+            return info  # scrcpy not running/no stream -> leave source alone
+    except Exception: pass
     try:
         r = subprocess.run(["pactl","get-default-source"], capture_output=True, text=True, timeout=3)
         if r.returncode == 0:
-            info["prev_default_source"] = r.stdout.strip()
-            r2 = subprocess.run(["pactl","get-source-mute", info["prev_default_source"]],
+            cur = r.stdout.strip()
+            # guard: don't capture scrcpy as prev (sticky loop bug)
+            if "scrcpy" in cur:
+                real = _find_real_source()
+                if real:
+                    cur = real
+                else:
+                    return info
+            info["prev_default_source"] = cur
+            r2 = subprocess.run(["pactl","get-source-mute", cur],
                                  capture_output=True, text=True, timeout=3)
             info["prev_default_mute"] = "yes" in r2.stdout.lower() if r2.returncode == 0 else None
     except Exception: pass
@@ -232,14 +264,41 @@ def set_phone_as_system_mic(cfg: dict) -> dict:
 
 
 def restore_system_audio(prev: dict) -> bool:
-    """Restore the default audio source after scrcpy exits."""
-    if not prev or not prev.get("prev_default_source"): return False
-    src = prev["prev_default_source"]
+    """Restore the default audio source after scrcpy exits.
+    If prev is missing/corrupted (points to scrcpy), falls back to first
+    real source instead of leaving a dead monitor as default. Always cleans
+    up the sticky scrcpy_mic.default leftover.
+    """
+    src = (prev or {}).get("prev_default_source")
+    # guard corrupted prev
+    if not src or "scrcpy" in src:
+        src = _find_real_source()
+        if not src:
+            # last fallback: try to set via wpctl to real source id, then try pactl
+            try:
+                r = subprocess.run(["pactl","get-default-source"], capture_output=True, text=True, timeout=3)
+                if "scrcpy" in r.stdout:
+                    real = _find_real_source()
+                    if real:
+                        subprocess.run(["pactl","set-default-source",real], capture_output=True, timeout=3)
+                        return True
+            except Exception: pass
+            return False
     try:
+        # before restoring, ensure the target source still exists
+        r = subprocess.run(["pactl","list","short","sources"], capture_output=True, text=True, timeout=3)
+        if src not in r.stdout:
+            alt = _find_real_source()
+            if alt: src = alt
+            else: return False
         subprocess.run(["pactl","set-default-source",src], capture_output=True, timeout=3)
-        if prev.get("prev_default_mute") is not None:
+        if prev and prev.get("prev_default_mute") is not None:
             want = "1" if prev["prev_default_mute"] else "0"
             subprocess.run(["pactl","set-source-mute",src,want], capture_output=True, timeout=3)
+        # confirm it took; if still on scrcpy, force again
+        r2 = subprocess.run(["pactl","get-default-source"], capture_output=True, text=True, timeout=3)
+        if "scrcpy" in r2.stdout and src not in r2.stdout:
+            subprocess.run(["pactl","set-default-source",src], capture_output=True, timeout=3)
         return True
     except Exception:
         return False
@@ -499,13 +558,12 @@ def start(cfg: dict) -> subprocess.Popen:
                             "settings put system screen_brightness_mode 0; settings put system screen_brightness 1; cmd display set-brightness 0.001"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
         except Exception: pass
-    env = None
-    if use_null_sink:
-        env = os.environ.copy()
-        env["PULSE_SINK"] = NULL_SINK
-        # Also set for PipeWire-native clients that respect it
-        env["PIPEWIRE_SINK"] = NULL_SINK
-    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+    # Route via _move_scrcpy_to_null_sink after launch instead of PULSE_SINK
+    # env. PULSE_SINK pollutes WirePlumber's default-nodes (sink.0=scrcpy_mic)
+    # and makes the null sink appear as a permanent output choice, conflicting
+    # with the real HDMI (SAMSUNG) sink. Moving the stream after it appears
+    # is sufficient and leaves no sticky default.
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     if cfg.get("mic_to_host", True) and cfg.get("mic_default", True):
         def _delay_default():
             prev = set_phone_as_system_mic(cfg)

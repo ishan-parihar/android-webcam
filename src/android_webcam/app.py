@@ -461,18 +461,12 @@ class App(Adw.Application):
                            capture_output=True, text=True, timeout=5)
         except Exception as e:
             logging.warning("pre-start adb connect: %s", e)
-        env = None
-        if use_null_sink:
-            env = os.environ.copy()
-            env["PULSE_SINK"] = _b.NULL_SINK
-            env["PIPEWIRE_SINK"] = _b.NULL_SINK
         try:
             self.proc = subprocess.Popen(
                 argv,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
                 start_new_session=True,
-                env=env,
             )
         except FileNotFoundError:
             self.toast("scrcpy not found — pacman -S scrcpy"); return
@@ -505,16 +499,21 @@ class App(Adw.Application):
         threading.Thread(target=reader, daemon=True, name="scrcpy-reader").start()
         # mic: promote scrcpy to system default source (so all apps pick it up)
         # and apply mute flag (echo protection).  Restore previous default on stop.
-        if self.cfg.get("mic_to_host", True):
+        # Guard: only auto-promote if mic_default is on; fixes sticky scrcpy loop.
+        if self.cfg.get("mic_to_host", True) and self.cfg.get("mic_default", True):
             def _mic_default():
                 time.sleep(2)  # wait for scrcpy to register PipeWire source
                 try:
                     prev = _b.set_phone_as_system_mic(self.cfg)
-                    self.cfg["_mic_prev"] = prev
                     if prev.get("set"):
+                        self.cfg["_mic_prev"] = prev
+                        try: save(self.cfg)
+                        except Exception: pass
                         state = "muted" if self.cfg.get("mic_mute") else "live"
                         GLib.idle_add(self._append_log,
                                       f"[mic] scrcpy is system default mic ({state})\n")
+                    else:
+                        logging.info("mic promotion skipped (scrcpy not ready or guard)")
                 except Exception as e:
                     logging.warning("mic default promotion failed: %s", e)
             threading.Thread(target=_mic_default, daemon=True, name="mic-default").start()
@@ -554,6 +553,17 @@ class App(Adw.Application):
         if prev:
             _b.restore_system_audio(prev)
             self.cfg["_mic_prev"] = None
+            try: save(self.cfg)
+            except Exception: pass
+        else:
+            # no prev recorded (scrcpy died early or guard blocked) — still ensure
+            # we are not left on dead scrcpy monitor
+            try:
+                import subprocess as _sp
+                cur = _sp.run(["pactl","get-default-source"], capture_output=True, text=True, timeout=2).stdout.strip()
+                if "scrcpy" in cur:
+                    _b.restore_system_audio({})
+            except Exception: pass
         try: self.proc.terminate()
         except Exception: pass
         try: self.proc.wait(timeout=3)
@@ -575,6 +585,15 @@ class App(Adw.Application):
             if prev:
                 _b.restore_system_audio(prev)
                 self.cfg["_mic_prev"] = None
+                try: save(self.cfg)
+                except Exception: pass
+            else:
+                try:
+                    import subprocess as _sp
+                    cur = _sp.run(["pactl","get-default-source"], capture_output=True, text=True, timeout=2).stdout.strip()
+                    if "scrcpy" in cur:
+                        _b.restore_system_audio({})
+                except Exception: pass
             self.start_btn.set_label("Start webcam → /dev/video0"); self.start_btn.set_visible(True); self.stop_btn.set_visible(False)
             self.status_row.set_subtitle(f"Exited {code} — /dev/video0 free"); self.status_icon.set_from_icon_name("camera-web-symbolic")
 
