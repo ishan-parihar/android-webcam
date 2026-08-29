@@ -121,20 +121,20 @@ class App(Adw.Application):
         self.torch_row.connect("notify::active", self.on_torch)
         grp_extra.add(self.torch_row)
 
-        # Audio: two independent switches
-        self.mic_row = Adw.SwitchRow(title="Phone mic → system (default)", subtitle="Forwards the phone's microphone to a PipeWire source called 'scrcpy' for apps to use.  ON by default — phone is your real system mic, no echo because scrcpy does NOT play the mic through your speakers.")
+        # Audio: standalone system mic (default) vs spy/surveillance (separate)
+        self.mic_row = Adw.SwitchRow(title="Phone mic → system", subtitle="ON by default — phone mic is your computer’s mic via null sink scrcpy_mic (HDMI silent, no echo). Apps see scrcpy_mic.monitor.")
         self.mic_row.set_active(bool(self.cfg.get("mic_to_host", True)))
         self.mic_row.connect("notify::active", self.on_mic)
         grp_extra.add(self.mic_row)
-        self.mic_default_row = Adw.SwitchRow(title="Set 'scrcpy' as system default mic", subtitle="ON by default — every app (browser, zoom, discord) uses the phone mic without any manual setup.  Restored on stop.")
+        self.mic_default_row = Adw.SwitchRow(title="Make phone mic the system default", subtitle="ON = standalone system mic: every app (Meet/Zoom/Discord) uses phone mic automatically (restored on stop). OFF = spy/surveillance: mic stays available as scrcpy_mic.monitor for manual use, not auto-selected.")
         self.mic_default_row.set_active(bool(self.cfg.get("mic_default", True)))
         self.mic_default_row.connect("notify::active", self.on_mic_default)
         grp_extra.add(self.mic_default_row)
-        self.speaker_row = Adw.SwitchRow(title="Speakerphone (host audio → phone)", subtitle="OFF by default.  Forwards your computer's audio output to the phone's speaker — use your phone as a remote speakerphone.  Disable 'Phone mic → system' to avoid feedback.")
+        self.speaker_row = Adw.SwitchRow(title="Surveillance speaker (host → phone)", subtitle="OFF by default. Forwards computer audio to phone speaker — use phone as remote speaker/surveillance. Keep OFF to avoid feedback when mic is on.")
         self.speaker_row.set_active(bool(self.cfg.get("mic_to_phone", False)))
         self.speaker_row.connect("notify::active", self.on_speaker)
         grp_extra.add(self.speaker_row)
-        self.audio_info = Gtk.Label(label="Default: phone mic → system mic, no echo.  Speakerphone mode routes host audio → phone speakers (off by default).")
+        self.audio_info = Gtk.Label(label="Default: phone mic is the system mic (no echo, via null sink). Spy: turn OFF ‘Make default’ to keep mic only for manual monitoring, or ON ‘Surveillance speaker’ to play host audio on phone.")
         self.audio_info.set_wrap(True); self.audio_info.set_xalign(0)
         grp_extra.add(self.audio_info)
         # v4l2 sink + buffer
@@ -439,15 +439,20 @@ class App(Adw.Application):
 
     def _start_proc(self):
         from . import backend as _b
+        # Kill any stale scrcpy camera (previous IP, crash, or manual test)
+        # Without this, IP hops leave two scrcpys (e.g. .8 and .12) and two
+        # sink-inputs — one moves to null sink, the other stays on HDMI (echo).
+        try:
+            subprocess.run(["pkill","-f","scrcpy.*camera.*v4l2-sink"], capture_output=True, timeout=3)
+            time.sleep(0.6)
+        except Exception: pass
         argv = _b.build_argv(self.cfg)
-        # Ensure v4l2loopback device exists (was removed as dep of iriun)
         if not _b.ensure_v4l2loopback():
             msg = "/dev/video0 missing — v4l2loopback not loaded. Run: sudo modprobe v4l2loopback card_label='Android Webcam' exclusive_caps=1 video_nr=0"
             logging.error(msg)
             self.toast(msg)
             GLib.idle_add(self._set_status, "✗ /dev/video0 missing — see log", "bad")
             return
-        # For mic -> system without echo, route to null sink
         use_null_sink = bool(self.cfg.get("mic_to_host", True)) and not bool(self.cfg.get("mic_to_phone", False))
         if use_null_sink:
             _b.ensure_null_sink()

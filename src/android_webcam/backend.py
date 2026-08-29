@@ -131,47 +131,61 @@ def apply_mic_mute(cfg: dict) -> bool:
 
 
 def _move_scrcpy_to_null_sink() -> bool:
-    """Find scrcpy's sink-input and move it to the null sink.
-    Returns True if moved or already on null sink.
+    """Find ALL scrcpy sink-inputs and move them to the null sink.
+    This prevents echo: phone mic → HDMI speakers → host mic feedback.
+    With null sink, phone mic goes to scrcpy_mic → monitor is system mic,
+    HDMI stays silent. Returns True if at least one moved or was already there.
     """
-    for _ in range(8):  # poll up to 4s
+    moved_any = False
+    for _ in range(8):  # poll up to 4s for scrcpy to appear
         try:
             r = subprocess.run(["pactl","list","sink-inputs"], capture_output=True, text=True, timeout=3)
             out = r.stdout
-            # Parse: Sink Input #<idx> ... application.name = "scrcpy"
-            # Find blocks containing scrcpy
-            if "application.name = \"scrcpy\"" in out:
-                # Extract idx for scrcpy block
-                import re as _re
-                # Find all "Sink Input #<idx>" that precede a scrcpy block
-                # Simplest: iterate lines, track current idx
-                current_idx = None
-                for line in out.splitlines():
-                    m = _re.match(r"Sink Input #(\d+)", line)
-                    if m:
-                        current_idx = m.group(1)
-                    if current_idx and "application.name = \"scrcpy\"" in line:
-                        # Found scrcpy's sink-input
-                        # Check if already on null sink
-                        # Look ahead for "Sink: <id>" and map id to name via short list
-                        rs = subprocess.run(["pactl","list","short","sink-inputs"], capture_output=True, text=True, timeout=3)
-                        for l in rs.stdout.splitlines():
-                            if l.startswith(current_idx + "\t") or l.startswith(current_idx + " "):
-                                parts = l.split()
-                                if len(parts) >= 2:
-                                    sink_id = parts[1]
-                                    # Resolve sink_id to name
-                                    rn = subprocess.run(["pactl","list","short","sinks"], capture_output=True, text=True, timeout=3)
-                                    for sl in rn.stdout.splitlines():
-                                        if sl.startswith(sink_id + "\t") and NULL_SINK in sl:
-                                            return True  # already on null sink
-                                # Move it
-                                mr = subprocess.run(["pactl","move-sink-input", current_idx, NULL_SINK], capture_output=True, text=True, timeout=3)
-                                return mr.returncode == 0
-                        current_idx = None
+            if "application.name = \"scrcpy\"" not in out:
+                time.sleep(0.5)
+                continue
+            import re as _re
+            # Collect all scrcpy sink-input indices
+            indices = []
+            current_idx = None
+            for line in out.splitlines():
+                m = _re.match(r"Sink Input #(\d+)", line)
+                if m:
+                    current_idx = m.group(1)
+                if current_idx and "application.name = \"scrcpy\"" in line:
+                    indices.append(current_idx)
+                    current_idx = None  # avoid duplicate for same block
+            if not indices:
+                time.sleep(0.5)
+                continue
+            # For each scrcpy sink-input, check if already on null sink, else move
+            rs = subprocess.run(["pactl","list","short","sink-inputs"], capture_output=True, text=True, timeout=3)
+            rn = subprocess.run(["pactl","list","short","sinks"], capture_output=True, text=True, timeout=3)
+            null_sink_id = None
+            for sl in rn.stdout.splitlines():
+                if NULL_SINK in sl:
+                    null_sink_id = sl.split()[0]
+                    break
+            for idx in indices:
+                # Find current sink for this idx
+                cur_sink = None
+                for l in rs.stdout.splitlines():
+                    if l.startswith(idx + "\t") or l.startswith(idx + " "):
+                        parts = l.split()
+                        if len(parts) >= 2:
+                            cur_sink = parts[1]
+                        break
+                if cur_sink == null_sink_id:
+                    moved_any = True
+                    continue
+                mr = subprocess.run(["pactl","move-sink-input", idx, NULL_SINK], capture_output=True, text=True, timeout=3)
+                if mr.returncode == 0:
+                    moved_any = True
+            if moved_any:
+                return True
         except Exception: pass
         time.sleep(0.5)
-    return False
+    return moved_any
 
 def set_phone_as_system_mic(cfg: dict) -> dict:
     """Make the forwarded phone mic the system default input source.
@@ -464,10 +478,13 @@ def start(cfg: dict) -> subprocess.Popen:
     """Start scrcpy with the given config. Returns the Popen."""
     argv = build_argv(cfg)
     tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
-    # Ensure v4l2loopback device exists (was removed as dep of iriun)
+    # Kill any stale scrcpy camera instances (IP hop, previous crash)
+    try:
+        subprocess.run(["pkill","-f","scrcpy.*camera.*v4l2-sink"], capture_output=True, timeout=3)
+        time.sleep(0.5)
+    except Exception: pass
     if not ensure_v4l2loopback():
         raise RuntimeError("/dev/video0 missing — v4l2loopback not loaded. Reinstall v4l2loopback-dkms and modprobe.")
-    # For mic -> system without echo, route scrcpy audio to a null sink
     mic_to_host = bool(cfg.get("mic_to_host", True))
     mic_to_phone = bool(cfg.get("mic_to_phone", False))
     use_null_sink = mic_to_host and not mic_to_phone
