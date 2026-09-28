@@ -658,17 +658,47 @@ SERVICE_TYPE = "_androidwebcam._tcp"
 
 
 def _lan_ip() -> str:
-    """This host's address on the LAN, so we bind one interface, not 0.0.0.0."""
+        """This host's address on the LAN, so we bind one interface, not 0.0.0.0.
+
+        The route probe picks the interface the kernel would use to reach the
+        outside world. A hardcoded gateway would pick the wrong address on any
+        other subnet, and a multi-homed box would bind one arbitrary interface.
+        """
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((_default_gateway(), 9))   # no packets sent; picks the route
+            ip = s.getsockname()[0]
+        except Exception:
+            try:
+                ip = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                ip = "0.0.0.0"
+        finally:
+            s.close()
+        return ip
+
+
+def _default_gateway() -> str:
+    """The real default gateway, read from the kernel's routing table.
+
+    Hardcoding 192.168.1.1 makes _lan_ip() return an address the phone cannot
+    reach on any other network, which surfaces as 'Couldn't find your computer'.
+    """
     import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(("192.168.1.1", 9))       # no packets sent; just picks the route
-        ip = s.getsockname()[0]
+        with open("/proc/net/route") as f:
+            next(f, None)                       # header
+            for line in f:
+                p = line.split()
+                # Destination 00000000 == default route; Gateway is little-endian
+                if len(p) > 2 and p[1] == "00000000":
+                    g = p[2]
+                    b = bytes.fromhex(g)
+                    return socket.inet_ntoa(b[::-1])
     except Exception:
-        ip = socket.gethostbyname(socket.gethostname())
-    finally:
-        s.close()
-    return ip
+        pass
+    return "8.8.8.8"                           # routable; nothing is sent
 
 
 def serve_key(host: str | None = None, port: int = PROVISION_PORT,
@@ -712,6 +742,7 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
             served["n"] += 1
             served["peer"] = self.client_address[0]
             print(f"  served key to {served['peer']} - closing", flush=True)
+            logging.info("served host key to %s", served["peer"])
             done.set()
             if once:
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -760,9 +791,13 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
 
     print(f"serving host adb key on http://{host}:{port} — waiting for the phone",
           flush=True)
+    logging.info("serve_key listening on %s:%s (one request, then close)", host, port)
     try:
-        done.wait(timeout=120)
+        # Long enough that the user can install and open the app without racing
+        # the server. It still closes by itself so the endpoint does not linger.
+        done.wait(timeout=600)
         if served["n"] == 0:
+            logging.warning("serve_key: timed out, no phone asked for the key")
             print("  timed out; nothing asked for the key", flush=True)
     except KeyboardInterrupt:
         print("\nstopped", flush=True)
@@ -957,6 +992,8 @@ def cli():
     p.add_argument("--serve", action="store_true",
                    help="serve this host's adb public key on the LAN so the phone app "
                         "can fetch it (no hand-copying)")
+    p.add_argument("--phone-log", action="store_true",
+                   help="print the phone app's discovery log, then exit")
     p.add_argument("--set-ip", help="Set phone IP and save to config")
     p.add_argument("--no-rotate", action="store_true", help="disable auto-rotate")
     a = p.parse_args()
@@ -969,6 +1006,17 @@ def cli():
             cfg["android_ip"]=a.set_ip
         save(cfg)
         print(f"Saved IP {cfg['android_ip']}:{cfg['android_port']} to config")
+        return
+    if a.phone_log:
+        # The phone writes /sdcard/android-webcam.log. Reading it over the
+        # already-open adb channel is how a failed discovery gets diagnosed
+        # instead of guessed at.
+        try:
+            out = subprocess.run(["adb", "shell", "cat", "/sdcard/android-webcam.log"],
+                                 capture_output=True, text=True, timeout=20)
+            print(out.stdout or out.stderr or "(no log yet on the phone)")
+        except Exception as e:
+            print(f"could not read phone log: {e}")
         return
     if a.serve:
         serve_key()

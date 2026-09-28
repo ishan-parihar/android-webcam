@@ -204,20 +204,50 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------ network
 
-    /** This phone's IPv4 on the interface that actually has a prefix length. */
-    private String myIp() {
+    /**
+     * The WiFi interface's IPv4 address.
+     *
+     * This deliberately does NOT return "the first non-loopback IPv4". On
+     * Android that is usually the CELLULAR interface (or a VPN/tethering one),
+     * so the scan would sweep the wrong subnet and never see the computer.
+     * Only a wlan* interface is accepted; if none is up we fall back to the
+     * first routable IPv4 so the app still works on a non-standard ROM.
+     */
+    private String myIp() { return wifiIface() == null ? firstRoutableV4() : v4(wifiIface()); }
+
+    /** The interface's IPv4 as a string, or null if it has none. */
+    private String v4(NetworkInterface n) {
+        try {
+            for (java.net.InterfaceAddress ia : n.getInterfaceAddresses()) {
+                InetAddress a = ia.getAddress();
+                if (a instanceof Inet4Address && !a.isLinkLocalAddress()) {
+                    return a.getHostAddress();
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private NetworkInterface wifiIface() {
         try {
             Enumeration<NetworkInterface> ifs = NetworkInterface.getNetworkInterfaces();
             while (ifs.hasMoreElements()) {
                 NetworkInterface n = ifs.nextElement();
                 if (!n.isUp() || n.isLoopback()) continue;
-                Enumeration<InetAddress> addrs = n.getInetAddresses();
-                while (addrs.hasMoreElements()) {
-                    InetAddress a = addrs.nextElement();
-                    if (a instanceof Inet4Address && !a.isLinkLocalAddress()) {
-                        return a.getHostAddress();
-                    }
-                }
+                if (n.getName().startsWith("wlan") && v4(n) != null) return n;
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private String firstRoutableV4() {
+        try {
+            Enumeration<NetworkInterface> ifs = NetworkInterface.getNetworkInterfaces();
+            while (ifs.hasMoreElements()) {
+                NetworkInterface n = ifs.nextElement();
+                if (!n.isUp() || n.isLoopback()) continue;
+                String s = v4(n);
+                if (s != null) return s;
             }
         } catch (Exception ignored) {}
         return null;
@@ -232,11 +262,11 @@ public class MainActivity extends Activity {
      */
     private int prefixLength() {
         try {
-            Enumeration<NetworkInterface> ifs = NetworkInterface.getNetworkInterfaces();
-            while (ifs.hasMoreElements()) {
-                NetworkInterface n = ifs.nextElement();
-                if (!n.isUp() || n.isLoopback()) continue;
-                for (java.net.InterfaceAddress ia : n.getInterfaceAddresses()) {
+            // Same interface myIp() reports, so the scan always covers the
+            // subnet whose address the user is looking at.
+            NetworkInterface w = wifiIface();
+            if (w != null) {
+                for (java.net.InterfaceAddress ia : w.getInterfaceAddresses()) {
                     InetAddress a = ia.getAddress();
                     if (a instanceof Inet4Address && !a.isLinkLocalAddress()) {
                         return ia.getNetworkPrefixLength();
@@ -341,17 +371,27 @@ public class MainActivity extends Activity {
         String[] hp = hostAndPort.split(":");
         String host = hp[0];
         int port = hp.length > 1 ? Integer.parseInt(hp[1]) : 7911;
+        String url = "http://" + host + ":" + port + "/adbkey.pub";
         try {
-            HttpURLConnection c = (HttpURLConnection)
-                    new URL("http://" + host + ":" + port + "/adbkey.pub").openConnection();
+            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
             c.setConnectTimeout(2500);
             c.setReadTimeout(4000);
-            if (c.getResponseCode() != 200) return null;
+            int code = c.getResponseCode();
+            if (code != 200) {
+                Log2.i("GET " + url + " -> HTTP " + code);
+                return null;
+            }
             try (InputStream in = c.getInputStream()) {
                 String s = new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
-                return (s.startsWith("Q") && s.length() > 100) ? s : null;
+                boolean ok = s.startsWith("Q") && s.length() > 100;
+                Log2.i("GET " + url + " -> 200, " + s.length() + " bytes, valid=" + ok);
+                return ok ? s : null;
             }
         } catch (Exception e) {
+            // The most likely cause: Network Security Config blocking cleartext,
+            // or the two machines not actually on the same subnet.
+            Log2.i("GET " + url + " -> FAILED " + e.getClass().getSimpleName()
+                    + ": " + e.getMessage());
             return null;
         }
     }
@@ -386,6 +426,9 @@ public class MainActivity extends Activity {
 
     private void autoConnect() {
         final String addr = myIp();
+        Log2.dumpInterfaces();
+        Log2.i("launch: myIp=" + addr + " hasRoot=" + hasRoot()
+                + " adbdListening=" + adbdListening() + " keys=" + countKeys());
         ui.post(() -> addrView.setText("This phone: "
                 + (addr == null ? "no WiFi address" : addr + ":" + ADB_PORT)));
 
@@ -417,12 +460,14 @@ public class MainActivity extends Activity {
             }
 
             say("Looking for your computer…");
+            Log2.i("start discovery; myIp=" + addr + " prefix=/" + prefixLength());
             // The scan is the PRIMARY path: it is the one that is actually
             // proven to work. mDNS is tried first because when it works it is
             // instant and unambiguous, but a host may not publish a resolvable
             // mDNS record at all, so it must never be the only way in.
             String host = discoverViaNsd();
             String how = "automatic discovery (mDNS)";
+            Log2.i("nsd -> " + (host == null ? "nothing" : host));
 
             if (host == null) {
                 say("Scanning this network for your computer…");
@@ -444,14 +489,21 @@ public class MainActivity extends Activity {
                     try { if (fs.get(i).get()) live.add(cands.get(i)); } catch (Exception ignored) {}
                 }
                 pool.shutdownNow();
+                Log2.i("scan: tried " + cands.size() + " addrs, live on 7911 = " + live);
+                if (live.isEmpty()) {
+                    Log2.i("scan: nothing listening on 7911 - is 'Trust this computer' "
+                            + "pressed on the host, and is the phone on the SAME wifi?");
+                }
                 for (String c : live) {
                     String k = fetchKeyFrom(c + ":7911");
+                    Log2.i("  fetch " + c + " -> " + (k == null ? "no valid key" : "key ok"));
                     if (k != null) { host = c + ":7911"; break; }
                 }
                 how = "network scan";
             }
 
             if (host == null) {
+                Log2.i("FAILED: no host found via nsd or scan");
                 ui.post(() -> {
                     statusView.setText("Couldn't find your computer.\n\n"
                             + "On the computer, open the Android Webcam app and press "
@@ -474,6 +526,7 @@ public class MainActivity extends Activity {
             }
 
             say("Found your computer at " + host + " (" + how + ")");
+            Log2.i("provisioning with key from " + host);
             provision(key, how);
         });
     }

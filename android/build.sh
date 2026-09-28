@@ -47,11 +47,14 @@ javac -nowarn -source 17 -target 17 \
   > "$BUILD/javac.log" 2>&1
 javac_rc=$?
 set -e
-grep -v 'bootstrap class path' "$BUILD/javac.log" | head -20 || true
+sed -n '1,20p' "$BUILD/javac.log" | grep -v 'bootstrap class path' || true
 # `| head` closes the pipe early, so with `set -o pipefail` a SUCCESSFUL javac
 # makes grep take SIGPIPE and the whole script exits 141. Read the log without
 # a pipe instead.
 sed -n '1,20p' "$BUILD/javac.log" | grep -v 'bootstrap class path' || true
+# NOTE: never pipe a long-running producer into `head`/`awk ... exit` here.
+# `set -o pipefail` turns the resulting SIGPIPE (141) into a FAILED build, even
+# though every stage succeeded.
 # Fail on the error lines themselves, not just on a missing .class file.
 if [ "$javac_rc" -ne 0 ] || grep -qE '(^|[^a-zA-Z])error:' "$BUILD/javac.log"; then
   echo "COMPILE FAILED (rc=$javac_rc)" >&2
@@ -79,7 +82,9 @@ cp "$BUILD/base.apk" "$BUILD/unsigned.apk"
 # packaging change cannot silently regress it. `unzip -v` prints the method as
 # "Stored" (capital S), which is why an earlier lowercase check produced a false
 # alarm on a perfectly good APK.
-arsc_method() { unzip -v "$1" 2>/dev/null | awk '$NF=="resources.arsc"{print $2; exit}'; }
+# No `exit` in the awk: it would close the pipe early, unzip would take SIGPIPE,
+# and pipefail would report exit 141 for an otherwise good build.
+arsc_method() { unzip -v "$1" 2>/dev/null | awk '$NF=="resources.arsc"{print $2}'; }
 case "$(arsc_method "$BUILD/aligned.apk")" in
   Stored|stored) echo "    resources.arsc: Stored (ok)" ;;
   *) echo "    FATAL: resources.arsc method = '$(arsc_method "$BUILD/aligned.apk")'" \
