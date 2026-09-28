@@ -54,16 +54,24 @@ class App(Adw.Application):
         changed.update(changes)
         fresh.update(changed)
         save(fresh)
-        self.cfg.update(changed)
-        self._baseline = load()
-        # Keep the visible endpoint honest: it may have changed under us.
-        ip = self.cfg.get("android_ip"); port = self.cfg.get("android_port")
+        # Adopt the ENDPOINT the phone pushed, in memory as well as on disk.
+        # Adopting only `changed` left self.cfg holding the pre-push port while
+        # _baseline moved to the real one, so the next settings change saw a
+        # mismatch and wrote the stale port straight back - the clobber landed
+        # on the second change instead of the first.
+        self.cfg.update(fresh)
+        self._baseline = dict(fresh)
+
+    def _show_endpoint(self):
+        """Refresh the IP:Port field after the endpoint changes under us.
+
+        Deliberately NOT done inside persist(): that runs on every keystroke in
+        the IP row, and rewriting the field the user is typing into makes the
+        cursor jump mid-edit.
+        """
+        ip, port = self.cfg.get("android_ip"), self.cfg.get("android_port")
         if ip and port and hasattr(self, "ip_row"):
-            try:
-                if self.ip_row.get_text() != f"{ip}:{port}":
-                    self.ip_row.set_text(f"{ip}:{port}")
-            except Exception:
-                pass
+            self.ip_row.set_text(f"{ip}:{port}")
 
     def on_activate(self, app):
         try:
@@ -347,10 +355,8 @@ class App(Adw.Application):
             # 1) optimistic: is the device already in 'device' state?
             if _wait_device_ready(ip, port, timeout=1.0) and _adb_shell_echo(ip, port, timeout=3.0):
                 logging.info("try_target %s:%d (%s): already ready, no connect needed", ip, port, why)
-                self.cfg["android_ip"] = ip
-                self.cfg["android_port"] = port
-                from .config import save
-                self.persist()
+                self.persist(android_ip=ip, android_port=port)
+                self._show_endpoint()
                 return True
             # 2) need to (re)connect — but DON'T disconnect first (that kills
             # an existing good connection and forces re-auth). Just connect.
@@ -372,11 +378,11 @@ class App(Adw.Application):
                     continue
                 if _adb_shell_echo(ip, port, timeout=4.0):
                     logging.info("try_target %s:%d (%s): ready after connect", ip, port, why)
-                    self.cfg["android_ip"] = ip
-                    self.cfg["android_port"] = port
-                    from .config import save
-                    self.persist()
-                    return True
+                self.cfg["android_ip"] = ip
+                self.cfg["android_port"] = port
+                self.persist(android_ip=ip, android_port=port)
+                self._show_endpoint()
+                return True
                 logging.warning("shell echo failed: %s:%d attempt %d", ip, port, attempt+1)
                 _t.sleep(0.8)
             return False
@@ -449,13 +455,18 @@ class App(Adw.Application):
 
     def on_ip_changed(self, row):
         txt = row.get_text().strip()
+        vals = {}
         if ":" in txt:
             ip, port = txt.rsplit(":",1)
-            try: self.cfg["android_port"]=int(port); self.cfg["android_ip"]=ip
-            except: pass
+            try: vals["android_port"] = int(port)
+            except ValueError:
+                # A half-typed port is normal while editing; do not save a
+                # truncated address, and do not silently swallow it either.
+                return
+            vals["android_ip"] = ip
         else:
-            self.cfg["android_ip"]=txt
-        self.persist(); self.refresh_cmd()
+            vals["android_ip"] = txt
+        self.persist(**vals); self.refresh_cmd()
 
     def on_facing(self, row, _):
         self.cfg["camera_facing"]="back" if row.get_selected()==0 else "front"
