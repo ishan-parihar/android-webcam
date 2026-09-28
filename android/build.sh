@@ -35,9 +35,26 @@ echo "==> aapt2: compile + link resources"
 
 echo "==> javac"
 find "$HERE/java" "$BUILD/gen" -name '*.java' > "$BUILD/sources.txt"
+# Clear stale output first: `set -e` plus the `| grep` pipe below cannot see
+# javac's exit status, so a previous build's .class files would otherwise
+# satisfy the check below and produce an APK built from OLD sources.
+rm -rf "$BUILD/compiled"
+# Capture output to a file rather than piping: a pipe discards javac's exit
+# status, and `|| true` on top of that hid real compile errors entirely.
+set +e
 javac -nowarn -source 17 -target 17 \
-  -cp "$ANDROID_JAR" -d "$BUILD/compiled" @"$BUILD/sources.txt" 2>&1 | grep -v 'bootstrap class path' || true
-[ -f "$BUILD/compiled/dev/ishanp/androidwebcam/MainActivity.class" ] || { echo "compile failed" >&2; exit 1; }
+  -cp "$ANDROID_JAR" -d "$BUILD/compiled" @"$BUILD/sources.txt" \
+  > "$BUILD/javac.log" 2>&1
+javac_rc=$?
+set -e
+grep -v 'bootstrap class path' "$BUILD/javac.log" | head -20 || true
+# Fail on the error lines themselves, not just on a missing .class file.
+if [ "$javac_rc" -ne 0 ] || grep -qE '(^|[^a-zA-Z])error:' "$BUILD/javac.log"; then
+  echo "COMPILE FAILED (rc=$javac_rc)" >&2
+  exit 1
+fi
+[ -f "$BUILD/compiled/dev/ishanp/androidwebcam/MainActivity.class" ] || {
+  echo "compile failed: no MainActivity.class" >&2; exit 1; }
 
 echo "==> d8: classes -> dex"
 find "$BUILD/compiled" -name '*.class' > "$BUILD/classes.txt"

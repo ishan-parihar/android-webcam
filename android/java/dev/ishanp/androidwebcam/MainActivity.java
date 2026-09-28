@@ -396,12 +396,22 @@ public class MainActivity extends Activity {
                 + (addr == null ? "no WiFi address" : addr + ":" + ADB_PORT)));
 
         bg.execute(() -> {
-            // Fast path: already provisioned (a previous launch). Then there is
-            // nothing to do and no reason to touch the network.
-            if (hasRoot() && adbdListening()) {
+            // Fast path: already provisioned on a PREVIOUS run. It must check
+            // that a trusted key is actually present, not merely that adbd
+            // happens to be listening: 5555 is also where the phone's own
+            // wireless-debugging daemon listens, so "adbd is up" alone would
+            // report Ready with an empty trust store - the exact stuck state.
+            if (hasRoot() && adbdListening() && countKeys() > 0) {
                 int keys = countKeys();
                 ui.post(() -> done("Ready — your computer can use this phone as a webcam. "
-                        + (keys > 0 ? keys + " trusted computer(s)." : "")));
+                        + keys + " trusted computer(s)."));
+                return;
+            }
+            if (hasRoot() && adbdListening() && countKeys() == 0) {
+                ui.post(() -> statusView.setText(
+                        "This phone is listening on " + ADB_PORT
+                        + " but has no trusted computer. Press “Trust this computer” "
+                        + "on your computer, then reopen this app."));
                 return;
             }
 
