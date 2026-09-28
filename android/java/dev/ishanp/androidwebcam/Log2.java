@@ -1,21 +1,41 @@
 package dev.ishanp.androidwebcam;
 
+import android.content.Context;
 import android.util.Log;
 
 /**
- * Append-only diagnostic log, world-readable so the desktop can pull it over
- * adb without root:  adb shell cat /sdcard/android-webcam.log
+ * Diagnostic log, written where BOTH logcat and adb can read it:
+ *   logcat -s AWCam                       (always available)
+ *   adb shell cat /sdcard/Android/data/dev.ishanp.androidwebcam/files/aw.log
  *
  * Exists because "Couldn't find your computer" is a symptom with a dozen
  * possible causes, and guessing between them costs the user a reinstall each
- * time. Every step of discovery writes here what it actually observed.
+ * time. Every step of discovery records what it actually observed.
  */
 final class Log2 {
     private static final String TAG = "AWCam";
-    private static final String FILE = "/sdcard/android-webcam.log";
     private static final int MAX_BYTES = 256 * 1024;
 
+    /** Set from onCreate; null before that. */
+    private static Context appCtx;
+
     private Log2() {}
+
+    static void init(Context c) { appCtx = c.getApplicationContext(); }
+
+    /**
+     * getExternalFilesDir(null) is app-private and needs NO storage permission
+     * on any API level, and stays adb-readable. A bare /sdcard path does NOT:
+     * on API 29+ scoped storage rejects it, and a swallowed exception would
+     * look exactly like "no logs were produced".
+     */
+    private static java.io.File logFile() {
+        if (appCtx == null) return null;
+        java.io.File d = appCtx.getExternalFilesDir(null);
+        if (d == null) d = appCtx.getFilesDir();     // internal fallback
+        if (d == null) return null;
+        return new java.io.File(d, "aw.log");
+    }
 
     static void i(String msg) {
         Log.i(TAG, msg);
@@ -23,10 +43,11 @@ final class Log2 {
     }
 
     private static synchronized void append(String msg) {
+        java.io.File f = logFile();
+        if (f == null) { Log.w(TAG, "no writable log dir"); return; }
         try {
-            java.io.File f = new java.io.File(FILE);
             if (f.exists() && f.length() > MAX_BYTES) {
-                // Keep it bounded; keep the tail, which is the useful part.
+                // Keep the tail; it is the part that matters.
                 String all = new String(java.nio.file.Files.readAllBytes(f.toPath()),
                         java.nio.charset.StandardCharsets.UTF_8);
                 all = all.substring(Math.max(0, all.length() - MAX_BYTES / 2));
@@ -39,9 +60,17 @@ final class Log2 {
                     java.nio.charset.StandardCharsets.UTF_8),
                     java.nio.file.StandardOpenOption.CREATE,
                     java.nio.file.StandardOpenOption.APPEND);
-        } catch (Throwable ignored) {
-            // Never let logging break the app; Logcat still has it.
+        } catch (Throwable t) {
+            // Report the reason instead of swallowing it - a silent failure here
+            // is indistinguishable from "logging never worked".
+            Log.w(TAG, "log write failed: " + t);
         }
+    }
+
+    /** Where the log lives, so the UI can show it. */
+    static String logPath() {
+        java.io.File f = logFile();
+        return f == null ? "(no writable dir)" : f.getAbsolutePath();
     }
 
     /** Every network interface with its addresses - the first thing to check. */

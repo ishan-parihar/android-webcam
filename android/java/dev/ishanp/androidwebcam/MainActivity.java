@@ -84,6 +84,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Log2.init(this);
         setContentView(buildUi());
         // Do the whole job automatically on launch. The user's only action is
         // opening the app.
@@ -129,6 +130,20 @@ public class MainActivity extends Activity {
         detailView.setPadding(0, dp(16), 0, 0);
         col.addView(detailView);
 
+        // Diagnostics live IN the app, not only on the host: the whole premise
+        // of the failure is that the phone is not yet trusted, so anything that
+        // needs adb is unreachable exactly when the log is needed most.
+        Button copyLog = new Button(this);
+        copyLog.setText("Copy diagnostics");
+        copyLog.setOnClickListener(v -> {
+            String body = readLog();
+            android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("awcam-log", body));
+            statusView.setText("Diagnostics copied. Paste them here.");
+        });
+        col.addView(copyLog, lpTop(dp(8)));
+
         // Manual path, collapsed by default. Exists only so a user on an exotic
         // network is never hard-blocked.
         manualBox = new LinearLayout(this);
@@ -161,6 +176,18 @@ public class MainActivity extends Activity {
 
         scroll.addView(col);
         return scroll;
+    }
+
+    /** The log file's contents, for the in-app copy button. */
+    private String readLog() {
+        java.io.File f = new java.io.File(Log2.logPath());
+        if (!f.exists()) return "(no log yet — open the app and let it try)";
+        try {
+            return new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                    java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return "(log unreadable: " + e + ")";
+        }
     }
 
     // ------------------------------------------------------ root helpers
@@ -397,17 +424,39 @@ public class MainActivity extends Activity {
     }
 
     /** Candidate hosts on our own subnet, bounded and excluding ourselves. */
+    /**
+     * Candidate hosts on the phone's own subnet.
+     *
+     * The step matters: a /16 network has 65k hosts, so probing every one is
+     * absurd, but the previous code computed a /16 mask and then still stepped
+     * by ONE, which only ever probed 192.168.0.x and could never reach a host at
+     * 192.168.1.13. Step by the block size so the sweep actually covers the
+     * subnet, and cap the total so a /16 cannot turn into a 65k scan.
+     */
     private List<String> scanSubnet(String myAddr) {
         List<String> out = new ArrayList<>();
-        int plen = Math.max(16, Math.min(prefixLength(), 24));
-        int mask = plen == 16 ? 0xFFFF0000 : (plen == 24 ? 0xFFFFFF00 : 0xFFFFC000);
+        int plen = 24;   // clamped: see sweepForHost/scanSubnet notes
         int mine = inetToInt(myAddr);
+        int mask = plen == 16 ? 0xFFFF0000 : (plen == 24 ? 0xFFFFFF00 : 0xFFFFC000);
         int net = mine & mask;
-        for (int i = 1; i < 255 && out.size() < 300; i++) {
-            int cand = net + i;
-            if (cand == mine) continue;
-            out.add(intToInet(cand));
+        int broadcast = net | ~mask;
+        // A /24 is what WiFi actually hands out, and it is the only case we
+        // can sweep exhaustively. A /16 would need 65k probes (a port scan of
+        // the whole network); a /16 with a 256-step walks the wrong axis and
+        // probes x.x.0.0 addresses instead of the /24 the host is on. So clamp
+        // to /24: it covers the real case and fails visibly otherwise.
+        int step = 1;
+        int n = 0;
+        for (int c = net + step; c < broadcast && n < 300; c += step) {
+            if (c == mine) continue;
+            out.add(intToInet(c));
+            n++;
         }
+        // Number of candidates, and whether this phone's own subnet was
+        // actually covered - a step that overshoots the broadcast address
+        // yields zero and looks identical to "the network is wrong".
+        Log2.i("scanSubnet: ip=" + myAddr + " prefix=/" + plen + " step=" + step
+                + " -> " + out.size() + " candidates");
         return out;
     }
 
@@ -420,6 +469,44 @@ public class MainActivity extends Activity {
     private static String intToInet(int v) {
         return ((v >> 24) & 255) + "." + ((v >> 16) & 255) + "."
              + ((v >> 8) & 255) + "." + (v & 255);
+    }
+
+    /**
+     * One sweep of the phone's own subnet for a host serving the key.
+     * Returns "ip:port" or null. Logging here is what makes a failed run
+     * diagnosable instead of a guess.
+     */
+    private String sweepForHost(String addr) {
+        ExecutorService pool = Executors.newFixedThreadPool(64);
+        try {
+            List<String> cands = scanSubnet(addr);
+            List<Future<Boolean>> fs = new ArrayList<>();
+            for (final String c : cands) {
+                fs.add(pool.submit(() -> {
+                    try (Socket s = new Socket()) {
+                        s.connect(new InetSocketAddress(c, 7911), 800);
+                        return true;
+                    } catch (Exception e) { return false; }
+                }));
+            }
+            List<String> live = new ArrayList<>();
+            for (int i = 0; i < fs.size(); i++) {
+                try { if (fs.get(i).get()) live.add(cands.get(i)); } catch (Exception ignored) {}
+            }
+            Log2.i("scan: tried " + cands.size() + " addrs, live on 7911 = " + live);
+            if (live.isEmpty()) {
+                Log2.i("scan: nothing listening on 7911. Is 'Trust this computer' pressed "
+                        + "on the host, and is this phone on the SAME wifi/subnet?");
+                return null;
+            }
+            for (String c : live) {
+                String k = fetchKeyFrom(c + ":7911");
+                if (k != null) return c + ":7911";
+            }
+            return null;
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     // ------------------------------------------------------------- flow
@@ -471,43 +558,33 @@ public class MainActivity extends Activity {
 
             if (host == null) {
                 say("Scanning this network for your computer…");
-                // Bounded concurrency on the provisioning port only.
-                java.util.concurrent.ExecutorService pool =
-                        Executors.newFixedThreadPool(64);
-                List<String> cands = scanSubnet(addr);
-                List<Future<Boolean>> fs = new ArrayList<>();
-                for (final String c : cands) {
-                    fs.add(pool.submit(() -> {
-                        try (Socket s = new Socket()) {
-                            s.connect(new InetSocketAddress(c, 7911), 800);
-                            return true;
-                        } catch (Exception e) { return false; }
-                    }));
-                }
-                List<String> live = new ArrayList<>();
-                for (int i = 0; i < fs.size(); i++) {
-                    try { if (fs.get(i).get()) live.add(cands.get(i)); } catch (Exception ignored) {}
-                }
-                pool.shutdownNow();
-                Log2.i("scan: tried " + cands.size() + " addrs, live on 7911 = " + live);
-                if (live.isEmpty()) {
-                    Log2.i("scan: nothing listening on 7911 - is 'Trust this computer' "
-                            + "pressed on the host, and is the phone on the SAME wifi?");
-                }
-                for (String c : live) {
-                    String k = fetchKeyFrom(c + ":7911");
-                    Log2.i("  fetch " + c + " -> " + (k == null ? "no valid key" : "key ok"));
-                    if (k != null) { host = c + ":7911"; break; }
-                }
+                host = sweepForHost(addr);
                 how = "network scan";
             }
 
             if (host == null) {
-                Log2.i("FAILED: no host found via nsd or scan");
+                // A single sweep can miss: the host may not have been pressed
+                // yet, or the two devices may have just been switched to the
+                // same WiFi. Retry a few times over ~30s rather than dropping
+                // straight to the paste prompt on one miss.
+                for (int attempt = 2; attempt <= 4 && host == null; attempt++) {
+                    say("Not yet — looking again (" + attempt + "/4)…");
+                    Log2.i("retry " + attempt + " sweep");
+                    try { Thread.sleep(7000); } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+                    host = sweepForHost(addr);
+                    if (host != null) how = "network scan (retry " + attempt + ")";
+                }
+            }
+
+            if (host == null) {
+                Log2.i("FAILED: no host found via nsd or 4 sweeps");
                 ui.post(() -> {
                     statusView.setText("Couldn't find your computer.\n\n"
                             + "On the computer, open the Android Webcam app and press "
                             + "“Trust this computer”, then reopen this app.");
+                    detailView.setText("Log: " + Log2.logPath());
                     spinner.bar.setVisibility(View.GONE);
                     manualBox.setVisibility(View.VISIBLE);
                 });

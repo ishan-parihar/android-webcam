@@ -1,5 +1,5 @@
 """scrcpy ↔ v4l2 backend. Pure argv builder + lifecycle; no GTK."""
-import subprocess, shlex, shutil, time, json, os, logging
+import subprocess, shlex, shutil, time, json, os, logging, sys
 from pathlib import Path
 from .config import SIZES, load, save, target
 
@@ -1008,15 +1008,25 @@ def cli():
         print(f"Saved IP {cfg['android_ip']}:{cfg['android_port']} to config")
         return
     if a.phone_log:
-        # The phone writes /sdcard/android-webcam.log. Reading it over the
-        # already-open adb channel is how a failed discovery gets diagnosed
-        # instead of guessed at.
-        try:
-            out = subprocess.run(["adb", "shell", "cat", "/sdcard/android-webcam.log"],
-                                 capture_output=True, text=True, timeout=20)
-            print(out.stdout or out.stderr or "(no log yet on the phone)")
-        except Exception as e:
-            print(f"could not read phone log: {e}")
+        # The phone writes into its own external files dir, which needs no
+        # storage permission and is adb-readable on every API level. A bare
+        # /sdcard path does NOT work on API 29+ (scoped storage) and a
+        # swallowed write error there looks identical to "no logs".
+        paths = [
+            "/sdcard/Android/data/dev.ishanp.androidwebcam/files/aw.log",
+            "/data/data/dev.ishanp.androidwebcam/files/aw.log",
+        ]
+        for p in paths:
+            try:
+                out = subprocess.run(["adb", "shell", "cat", p],
+                                     capture_output=True, text=True, timeout=20)
+                if out.returncode == 0 and out.stdout.strip():
+                    print(out.stdout)
+                    break
+            except Exception as e:
+                print(f"  ({p}: {e})", file=sys.stderr)
+        else:
+            print("no phone log found; on the phone, tap 'Copy diagnostics' instead")
         return
     if a.serve:
         serve_key()
