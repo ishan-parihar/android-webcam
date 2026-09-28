@@ -226,6 +226,9 @@ public class MainActivity extends Activity {
     /**
      * The real network prefix length, so a fallback scan covers the subnet the
      * phone is actually on instead of assuming a /24.
+     *
+     * getNetworkPrefixLength() lives on InterfaceAddress, NOT on
+     * NetworkInterface - verified against platforms/android-36 with javap.
      */
     private int prefixLength() {
         try {
@@ -233,19 +236,10 @@ public class MainActivity extends Activity {
             while (ifs.hasMoreElements()) {
                 NetworkInterface n = ifs.nextElement();
                 if (!n.isUp() || n.isLoopback()) continue;
-                Enumeration<InetAddress> addrs = n.getInetAddresses();
-                while (addrs.hasMoreElements()) {
-                    InetAddress a = addrs.nextElement();
+                for (java.net.InterfaceAddress ia : n.getInterfaceAddresses()) {
+                    InetAddress a = ia.getAddress();
                     if (a instanceof Inet4Address && !a.isLinkLocalAddress()) {
-                        // getNetworkPrefixLength() is API 24+, but it is hidden
-                        // in the android.jar stub used to compile, so call it
-                        // reflectively. Falls back to /24 if absent.
-                        try {
-                            Object v = NetworkInterface.class
-                                    .getMethod("getNetworkPrefixLength").invoke(n);
-                            if (v instanceof Integer) return (Integer) v;
-                        } catch (Exception ignored) {}
-                        return 24;
+                        return ia.getNetworkPrefixLength();
                     }
                 }
             }
@@ -325,9 +319,9 @@ public class MainActivity extends Activity {
 
         boolean started = false;
         try {
-            // NsdManager.PROTO_DNS_SD is 0; the constant is hidden in the
-            // android.jar stub used to compile, so pass the literal.
-            mgr.discoverServices(SERVICE_TYPE, 0, dl);
+            // The constant is PROTOCOL_DNS_SD (verified against
+            // platforms/android-36 with javap), not PROTO_DNS.
+            mgr.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, dl);
             started = true;
             found.await(10, TimeUnit.SECONDS);
         } catch (InterruptedException ignored) {
@@ -401,18 +395,19 @@ public class MainActivity extends Activity {
             // happens to be listening: 5555 is also where the phone's own
             // wireless-debugging daemon listens, so "adbd is up" alone would
             // report Ready with an empty trust store - the exact stuck state.
-            if (hasRoot() && adbdListening() && countKeys() > 0) {
+            //
+            // countKeys() shells out to su, so call it once and reuse the value.
+            if (hasRoot() && adbdListening()) {
                 int keys = countKeys();
-                ui.post(() -> done("Ready — your computer can use this phone as a webcam. "
-                        + keys + " trusted computer(s)."));
-                return;
-            }
-            if (hasRoot() && adbdListening() && countKeys() == 0) {
-                ui.post(() -> statusView.setText(
-                        "This phone is listening on " + ADB_PORT
-                        + " but has no trusted computer. Press “Trust this computer” "
-                        + "on your computer, then reopen this app."));
-                return;
+                if (keys > 0) {
+                    ui.post(() -> done("Ready — your computer can use this phone as a "
+                            + "webcam. " + keys + " trusted computer(s)."));
+                    return;
+                }
+                // Listening but EMPTY: the port belongs to the phone's own
+                // wireless-debugging adbd. Do NOT stop here - fall through and
+                // provision, because the host is likely already reachable and the
+                // whole point is that the user does nothing.
             }
 
             if (addr == null) {

@@ -48,6 +48,10 @@ javac -nowarn -source 17 -target 17 \
 javac_rc=$?
 set -e
 grep -v 'bootstrap class path' "$BUILD/javac.log" | head -20 || true
+# `| head` closes the pipe early, so with `set -o pipefail` a SUCCESSFUL javac
+# makes grep take SIGPIPE and the whole script exits 141. Read the log without
+# a pipe instead.
+sed -n '1,20p' "$BUILD/javac.log" | grep -v 'bootstrap class path' || true
 # Fail on the error lines themselves, not just on a missing .class file.
 if [ "$javac_rc" -ne 0 ] || grep -qE '(^|[^a-zA-Z])error:' "$BUILD/javac.log"; then
   echo "COMPILE FAILED (rc=$javac_rc)" >&2
@@ -95,7 +99,8 @@ fi
 "$BT/apksigner" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android \
   --min-sdk-version 29 --out "$OUT" "$BUILD/aligned.apk"
 "$BT/apksigner" verify --min-sdk-version 29 "$OUT" >/dev/null
-"$BT/aapt2" dump badging "$OUT" | head -1
+# Do not pipe into head: with pipefail that turns a good run into exit 141.
+"$BT/aapt2" dump badging "$OUT" | sed -n '1p'
 
 echo "==> built: $OUT"
 ls -lh "$OUT" | awk '{print "    "$5, $9}'
