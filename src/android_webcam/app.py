@@ -29,9 +29,41 @@ class App(Adw.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
         self.cfg = load()
+        self._baseline = load()
         self.proc: subprocess.Popen | None = None
         self.log_lines: list[str] = []
         self.connect("activate", self.on_activate)
+
+    def persist(self, **changes):
+        """Persist the GUI's edits WITHOUT clobbering the phone's endpoint.
+
+        self.cfg is a snapshot taken at startup, but the phone pushes its real
+        adb endpoint to /phone WHILE THE APP IS RUNNING. A whole-dict save
+        would write the stale pre-push android_port back over the real one the
+        first time any setting is touched, silently undoing the port fix.
+
+        So: re-read disk, apply only the keys the GUI itself edited since the
+        last save, and leave everything else alone. Callers mutate self.cfg
+        directly, so the edited set is a diff against self._baseline (this
+        process's load, NOT the current disk). Diffing against disk would be
+        wrong: the phone's push makes the port look "changed" and would be
+        written straight back.
+        """
+        fresh = load()
+        changed = {k: v for k, v in self.cfg.items() if self._baseline.get(k) != v}
+        changed.update(changes)
+        fresh.update(changed)
+        save(fresh)
+        self.cfg.update(changed)
+        self._baseline = load()
+        # Keep the visible endpoint honest: it may have changed under us.
+        ip = self.cfg.get("android_ip"); port = self.cfg.get("android_port")
+        if ip and port and hasattr(self, "ip_row"):
+            try:
+                if self.ip_row.get_text() != f"{ip}:{port}":
+                    self.ip_row.set_text(f"{ip}:{port}")
+            except Exception:
+                pass
 
     def on_activate(self, app):
         try:
@@ -318,7 +350,7 @@ class App(Adw.Application):
                 self.cfg["android_ip"] = ip
                 self.cfg["android_port"] = port
                 from .config import save
-                save(self.cfg)
+                self.persist()
                 return True
             # 2) need to (re)connect — but DON'T disconnect first (that kills
             # an existing good connection and forces re-auth). Just connect.
@@ -343,7 +375,7 @@ class App(Adw.Application):
                     self.cfg["android_ip"] = ip
                     self.cfg["android_port"] = port
                     from .config import save
-                    save(self.cfg)
+                    self.persist()
                     return True
                 logging.warning("shell echo failed: %s:%d attempt %d", ip, port, attempt+1)
                 _t.sleep(0.8)
@@ -423,11 +455,11 @@ class App(Adw.Application):
             except: pass
         else:
             self.cfg["android_ip"]=txt
-        save(self.cfg); self.refresh_cmd()
+        self.persist(); self.refresh_cmd()
 
     def on_facing(self, row, _):
         self.cfg["camera_facing"]="back" if row.get_selected()==0 else "front"
-        self.cfg["camera_id"]=None; save(self.cfg); self.refresh_cmd()
+        self.cfg["camera_id"]=None; self.persist(); self.refresh_cmd()
 
     def on_res(self, row,_):
         sel=row.get_selected()
@@ -435,20 +467,20 @@ class App(Adw.Application):
         elif sel==1: self.cfg["resolution"]="1080p"; self.cfg["custom_size"]=None
         else: self.cfg["custom_size"]= self.custom_size_row.get_text() or "1280x720"
         self.custom_size_row.set_visible(sel==2)
-        save(self.cfg); self.refresh_cmd()
+        self.persist(); self.refresh_cmd()
 
     def on_custom_size(self,row):
-        self.cfg["custom_size"]=row.get_text().strip() or None; save(self.cfg); self.refresh_cmd()
+        self.cfg["custom_size"]=row.get_text().strip() or None; self.persist(); self.refresh_cmd()
 
     def on_fps(self,row,_):
-        self.cfg["fps"]=FPS_CHOICES[row.get_selected()]; save(self.cfg); self.refresh_cmd()
+        self.cfg["fps"]=FPS_CHOICES[row.get_selected()]; self.persist(); self.refresh_cmd()
 
-    def on_preview(self,row,_): self.cfg["with_preview"]=row.get_active(); save(self.cfg); self.refresh_cmd()
+    def on_preview(self,row,_): self.cfg["with_preview"]=row.get_active(); self.persist(); self.refresh_cmd()
 
-    def on_torch(self,row,_): self.cfg["torch"]=row.get_active(); save(self.cfg); self.refresh_cmd()
+    def on_torch(self,row,_): self.cfg["torch"]=row.get_active(); self.persist(); self.refresh_cmd()
 
     def on_mic(self,row,_):
-        self.cfg["mic_to_host"]=row.get_active(); save(self.cfg); self.refresh_cmd()
+        self.cfg["mic_to_host"]=row.get_active(); self.persist(); self.refresh_cmd()
         if row.get_active():
             self.toast("Phone mic → system.  No echo — scrcpy will NOT play the mic through your speakers.")
         else:
@@ -456,21 +488,21 @@ class App(Adw.Application):
 
     def on_mic_default(self,row,_):
         # row active = promote scrcpy to system default source at start
-        self.cfg["mic_default"]=row.get_active(); save(self.cfg); self.refresh_cmd()
+        self.cfg["mic_default"]=row.get_active(); self.persist(); self.refresh_cmd()
         if row.get_active():
             self.toast("Phone mic will become system default mic on start.")
         else:
             self.toast("Phone mic available as a source, but NOT promoted to default.")
 
     def on_speaker(self,row,_):
-        self.cfg["mic_to_phone"]=row.get_active(); save(self.cfg); self.refresh_cmd()
+        self.cfg["mic_to_phone"]=row.get_active(); self.persist(); self.refresh_cmd()
         if row.get_active(): self.toast("Host mic → phone speakers. Useful for using phone as a speaker.")
 
-    def on_rotate(self,row,_): self.cfg["auto_rotate"]=row.get_active(); save(self.cfg); self.refresh_cmd()
+    def on_rotate(self,row,_): self.cfg["auto_rotate"]=row.get_active(); self.persist(); self.refresh_cmd()
 
-    def on_v4l2(self,row): self.cfg["v4l2_sink"]=row.get_text().strip() or "/dev/video0"; save(self.cfg); self.refresh_cmd()
+    def on_v4l2(self,row): self.cfg["v4l2_sink"]=row.get_text().strip() or "/dev/video0"; self.persist(); self.refresh_cmd()
 
-    def on_bright(self,row,_): self.cfg["stay_brightness_low"]=row.get_active(); save(self.cfg)
+    def on_bright(self,row,_): self.cfg["stay_brightness_low"]=row.get_active(); self.persist()
 
     def on_ping(self,_):
         def bg():
@@ -573,7 +605,7 @@ class App(Adw.Application):
                     prev = _b.set_phone_as_system_mic(self.cfg)
                     if prev.get("set"):
                         self.cfg["_mic_prev"] = prev
-                        try: save(self.cfg)
+                        try: self.persist()
                         except Exception: pass
                         state = "muted" if self.cfg.get("mic_mute") else "live"
                         GLib.idle_add(self._append_log,
@@ -606,7 +638,7 @@ class App(Adw.Application):
             GLib.idle_add(self.log_buf.insert, self.log_buf.get_end_iter(), f"[rotate] → {new_orientation}°\n")
             self._stop_proc()
             self.cfg["auto_rotate_orientation"] = int(new_orientation)
-            save(self.cfg)
+            self.persist()
             time.sleep(0.5)
             self._start_proc()
         self._rotator = rotation.start_rotator(restart, self.cfg, window_class="scrcpy", interval=2.0)
@@ -619,7 +651,7 @@ class App(Adw.Application):
         if prev:
             _b.restore_system_audio(prev)
             self.cfg["_mic_prev"] = None
-            try: save(self.cfg)
+            try: self.persist()
             except Exception: pass
         else:
             # no prev recorded (scrcpy died early or guard blocked) — still ensure
@@ -651,7 +683,7 @@ class App(Adw.Application):
             if prev:
                 _b.restore_system_audio(prev)
                 self.cfg["_mic_prev"] = None
-                try: save(self.cfg)
+                try: self.persist()
                 except Exception: pass
             else:
                 try:
