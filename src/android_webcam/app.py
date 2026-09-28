@@ -72,6 +72,14 @@ class App(Adw.Application):
         self.status_row.add_prefix(self.status_icon)
         self.ping_btn = Gtk.Button(label="Ping"); self.ping_btn.connect("clicked", self.on_ping)
         self.connect_btn = Gtk.Button(label="Connect"); self.connect_btn.connect("clicked", self.on_connect)
+        # Runs the host's key advertisement so the phone can trust this
+        # computer on its own. Without this the ONLY way to hand the key over
+        # is a terminal, which is the step users get stuck on.
+        self.serve_btn = Gtk.Button(label="Let phone in")
+        self.serve_btn.set_tooltip_text(
+            "Advertise this computer on the network and give the phone app its "
+            "trust key. Open the Android Webcam app on the phone afterwards.")
+        self.serve_btn.connect("clicked", self.on_serve)
         h = Gtk.Box(spacing=6); h.append(self.ping_btn); h.append(self.connect_btn)
         self.status_row.add_suffix(h)
         grp_status = Adw.PreferencesGroup(title="Device", description="Redmi Note 8 Pro @ 192.168.1.12:5555 via adb TCP 5555")
@@ -154,6 +162,17 @@ class App(Adw.Application):
         grp_extra.add(self.rotate_row)
         box.append(grp_extra)
 
+        # First-run pairing helper, as its own group so it reads as a step
+        # rather than as one more option.
+        grp_pair = Adw.PreferencesGroup(
+            title="First-time setup",
+            description="One time only. Press this, then open the Android Webcam app "
+                        "on your phone. After that the phone never needs pairing again.")
+        self.serve_btn.add_css_class("suggested-action")
+        self.serve_btn.set_hexpand(True)
+        grp_pair.add(self.serve_row_wrap())
+        box.append(grp_pair)
+
         # Command preview
         self.cmd_label = Gtk.Label(label=""); self.cmd_label.set_selectable(True); self.cmd_label.set_wrap(True)
         self.cmd_label.add_css_class("monospace")
@@ -191,9 +210,45 @@ class App(Adw.Application):
         # initial ping + auto-start: run on the GLib main loop, no user click
         GLib.idle_add(self._on_startup)
 
+    def serve_row_wrap(self):
+        """Wrap the button so it sits cleanly inside a PreferencesGroup."""
+        row = Adw.ActionRow(title="", subtitle="")
+        row.set_title_lines(0)
+        row.add_suffix(self.serve_btn)
+        return row
+
     # handlers
     def toast(self, msg: str):
         self.toast_overlay.add_toast(Adw.Toast.new(msg))
+
+    def on_serve(self, _btn):
+        """Advertise the host and hand the phone its adb public key.
+
+        Runs serve_key on a worker thread: it advertises over mDNS, serves one
+        request, then exits. Until the phone fetches the key the phone app has no
+        way to trust this computer, and the user is stuck at a paste field.
+        """
+        if getattr(self, "_serving", False):
+            self.toast("Already waiting for the phone — open the app on your phone.")
+            return
+        self._serving = True
+        self.serve_btn.set_sensitive(False)
+        GLib.idle_add(self.toast, "Waiting for the phone… open the Android Webcam app on it.")
+
+        def work():
+            from . import backend
+            try:
+                backend.serve_key(once=True)
+                GLib.idle_add(self.toast, "Phone got the key. You can close this window.")
+            except Exception as e:
+                logging.warning("serve_key failed: %s", e)
+                GLib.idle_add(self.toast, f"Could not share the key: {e}")
+            finally:
+                self._serving = False
+                GLib.idle_add(lambda: self.serve_btn.set_sensitive(True))
+
+        threading.Thread(target=work, daemon=True).start()
+        return False
 
     def _on_startup(self):
         """Initial boot: ping phone → if unreachable, run --discover → re-ping
@@ -448,7 +503,7 @@ class App(Adw.Application):
         except Exception: pass
         argv = _b.build_argv(self.cfg)
         if not _b.ensure_v4l2loopback():
-            msg = "/dev/video0 missing — v4l2loopback not loaded. Run: sudo modprobe v4l2loopback card_label='Android Webcam' exclusive_caps=1 video_nr=0"
+            msg = "/dev/video0 missing — v4l2loopback not loaded. Run: sudo modprobe v4l2loopback card_label='Android Webcam' exclusive_caps=0 video_nr=0"
             logging.error(msg)
             self.toast(msg)
             GLib.idle_add(self._set_status, "✗ /dev/video0 missing — see log", "bad")

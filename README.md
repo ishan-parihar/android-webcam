@@ -18,7 +18,7 @@ sudo pacman -S scrcpy android-tools v4l2loopback-dkms linux-headers ffmpeg
 # group + module (one reboot after headers)
 sudo usermod -aG video,adbusers $USER
 echo "v4l2loopback" | sudo tee /etc/modules-load.d/v4l2loopback.conf
-echo 'options v4l2loopback card_label="Android Webcam" exclusive_caps=1 video_nr=0' | sudo tee /etc/modprobe.d/v4l2loopback.conf
+echo 'options v4l2loopback card_label="Android Webcam" exclusive_caps=0 video_nr=0' | sudo tee /etc/modprobe.d/v4l2loopback.conf
 ./scripts/install.sh
 ```
 

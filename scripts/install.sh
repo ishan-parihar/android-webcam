@@ -79,7 +79,7 @@ fi
 log "Configuring v4l2loopback…"
 sudo mkdir -p /etc/modules-load.d /etc/modprobe.d
 echo "v4l2loopback" | sudo tee /etc/modules-load.d/v4l2loopback.conf >/dev/null
-echo 'options v4l2loopback card_label="Android Webcam" exclusive_caps=1 video_nr=0' | sudo tee /etc/modprobe.d/v4l2loopback.conf >/dev/null
+echo 'options v4l2loopback card_label="Android Webcam" exclusive_caps=0 video_nr=0' | sudo tee /etc/modprobe.d/v4l2loopback.conf >/dev/null
 # Unload wrong flavour first (old Iriun label)
 if lsmod | grep -q v4l2loopback; then
   if v4l2-ctl --list-devices 2>&1 | grep -q "Iriun Webcam"; then
@@ -90,7 +90,7 @@ if lsmod | grep -q v4l2loopback; then
 fi
 if ! lsmod | grep -q v4l2loopback; then
   log "Loading v4l2loopback…"
-  sudo modprobe v4l2loopback card_label="Android Webcam" exclusive_caps=1 video_nr=0 2>&1 | head -n 5 || true
+  sudo modprobe v4l2loopback card_label="Android Webcam" exclusive_caps=0 video_nr=0 2>&1 | head -n 5 || true
   sleep 0.8
 fi
 # Udev can be slow — trigger and wait for /dev/video0

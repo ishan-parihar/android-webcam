@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The host serves the adb public key over plain HTTP on the LAN, because
+  provisioning happens before any pairing exists, so cleartext must be allowed.
+
+  A network_security_config is deliberately NOT used: <domain> entries are
+  matched by exact string or DNS label suffix, NOT by CIDR. "192.168.0.0/16"
+  would never match 192.168.1.13, so scoping RFC1918 ranges there silently
+  blocks the only destination this app has - a config that looks like a fix
+  while breaking every fetch with CLEARTEXT communication not permitted.
+
+  App-wide cleartext is therefore the honest setting: the app contacts exactly
+  one host, the user's own computer, on the user's own LAN. It never talks to a
+  server on the public internet.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
