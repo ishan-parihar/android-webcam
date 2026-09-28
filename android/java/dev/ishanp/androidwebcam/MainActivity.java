@@ -403,6 +403,11 @@ public class MainActivity extends Activity {
             HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
             c.setConnectTimeout(2500);
             c.setReadTimeout(4000);
+            // Some Android builds block the default Java User-Agent on
+            // cleartext HTTP, or route it through a captive-portal probe. A
+            // plain token avoids both.
+            c.setRequestProperty("User-Agent", "android-webcam/1.0");
+            c.setRequestProperty("Accept", "*/*");
             int code = c.getResponseCode();
             if (code != 200) {
                 Log2.i("GET " + url + " -> HTTP " + code);
@@ -435,9 +440,9 @@ public class MainActivity extends Activity {
      */
     private List<String> scanSubnet(String myAddr) {
         List<String> out = new ArrayList<>();
-        int plen = 24;   // clamped: see sweepForHost/scanSubnet notes
+        int plen = 24;   // see note below
         int mine = inetToInt(myAddr);
-        int mask = plen == 16 ? 0xFFFF0000 : (plen == 24 ? 0xFFFFFF00 : 0xFFFFC000);
+        int mask = 0xFFFFFF00;
         int net = mine & mask;
         int broadcast = net | ~mask;
         // A /24 is what WiFi actually hands out, and it is the only case we
@@ -452,11 +457,14 @@ public class MainActivity extends Activity {
             out.add(intToInet(c));
             n++;
         }
-        // Number of candidates, and whether this phone's own subnet was
-        // actually covered - a step that overshoots the broadcast address
-        // yields zero and looks identical to "the network is wrong".
-        Log2.i("scanSubnet: ip=" + myAddr + " prefix=/" + plen + " step=" + step
-                + " -> " + out.size() + " candidates");
+        // WiFi hands out a /24 and that is the only case we sweep
+        // exhaustively. A wider prefix needs tens of thousands of probes (a
+        // port scan of the whole network), and a block-step over one silently
+        // covers just the first /24 - which looks like "nothing is there"
+        // rather than "we never looked". The real prefix is logged so the
+        // clamp is visible instead of hidden in the mask.
+        Log2.i("scanSubnet: ip=" + myAddr + " realPrefix=/" + prefixLength()
+                + " sweeping /24 -> " + out.size() + " candidates");
         return out;
     }
 
@@ -494,6 +502,17 @@ public class MainActivity extends Activity {
                 try { if (fs.get(i).get()) live.add(cands.get(i)); } catch (Exception ignored) {}
             }
             Log2.i("scan: tried " + cands.size() + " addrs, live on 7911 = " + live);
+            // Put the outcome ON SCREEN. "Looking again" with no visible reason
+            // is the failure mode this whole change exists to eliminate.
+            final int tried = cands.size();
+            final List<String> liveCopy = new ArrayList<>(live);
+            ui.post(() -> statusView.setText(
+                    tried + " addresses tried on port 7911.\n"
+                    + (liveCopy.isEmpty()
+                        ? "Nothing answered.\n\nThe computer is not offering the key: press "
+                          + "“Let phone in” on it, and check this phone is on the SAME WiFi."
+                        : "Answered: " + liveCopy
+                          + "\n\nTrying to fetch the key…")));
             if (live.isEmpty()) {
                 Log2.i("scan: nothing listening on 7911. Is 'Trust this computer' pressed "
                         + "on the host, and is this phone on the SAME wifi/subnet?");
@@ -515,7 +534,11 @@ public class MainActivity extends Activity {
         final String addr = myIp();
         Log2.dumpInterfaces();
         Log2.i("launch: myIp=" + addr + " hasRoot=" + hasRoot()
-                + " adbdListening=" + adbdListening() + " keys=" + countKeys());
+                + " adbdListening=" + adbdListening() + " keys=" + countKeys()
+                + " logPath=" + Log2.logPath());
+        Log2.i("interfaces chosen: wifi="
+                + (wifiIface() == null ? "none" : wifiIface().getName())
+                + " realPrefix=/" + prefixLength());
         ui.post(() -> addrView.setText("This phone: "
                 + (addr == null ? "no WiFi address" : addr + ":" + ADB_PORT)));
 
@@ -546,15 +569,15 @@ public class MainActivity extends Activity {
                 return;
             }
 
-            say("Looking for your computer…");
-            Log2.i("start discovery; myIp=" + addr + " prefix=/" + prefixLength());
-            // The scan is the PRIMARY path: it is the one that is actually
-            // proven to work. mDNS is tried first because when it works it is
-            // instant and unambiguous, but a host may not publish a resolvable
-            // mDNS record at all, so it must never be the only way in.
-            String host = discoverViaNsd();
-            String how = "automatic discovery (mDNS)";
-            Log2.i("nsd -> " + (host == null ? "nothing" : host));
+        say("Looking for your computer…");
+        Log2.i("start discovery; myIp=" + addr + " prefix=/" + prefixLength());
+        // The scan is the PRIMARY path: it is the one that is actually
+        // proven to work. mDNS is tried first because when it works it is
+        // instant and unambiguous, but a host may not publish a resolvable
+        // mDNS record at all, so it must never be the only way in.
+        String host = discoverViaNsd();
+        String how = "automatic discovery (mDNS)";
+        Log2.i("nsd -> " + (host == null ? "nothing" : host));
 
             if (host == null) {
                 say("Scanning this network for your computer…");

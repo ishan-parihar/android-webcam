@@ -711,8 +711,8 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
     Safety properties, deliberately:
       * binds the SPECIFIC LAN address, not 0.0.0.0, so nothing off-LAN and no
         other service on this machine can reach it;
-      * serves a SINGLE request and then stops, so the endpoint does not linger
-        on a shared network;
+      * serves the key, then lingers ~45s so a phone retry that was already in
+        flight is not left with a dead endpoint, then closes itself;
       * prints the peer address, so the pairing is visible to the operator.
     """
     from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -727,7 +727,8 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
         host = _lan_ip()
 
     served = {"n": 0, "peer": "-"}
-    done = threading.Event()
+    deadline = time.monotonic() + 600
+    GRACE = 45          # outlives the phone's ~30s of retries
 
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -741,11 +742,14 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
             self.wfile.write(body)
             served["n"] += 1
             served["peer"] = self.client_address[0]
-            print(f"  served key to {served['peer']} - closing", flush=True)
+            print(f"  served key to {served['peer']} - staying up briefly", flush=True)
             logging.info("served host key to %s", served["peer"])
-            done.set()
-            if once:
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
+            # Signal COMPLETION, not first contact, and never shut the listener
+            # down from here. The phone's sweep opens a TCP socket and only then
+            # issues the HTTP GET, and it may retry several times over ~30s; a
+            # server that exits on first contact dies between the probe and the
+            # fetch, and the phone stalls on "looking again" forever.
+            # main() closes this after a grace period instead.
 
         def log_message(self, *a): pass
 
@@ -791,12 +795,19 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
 
     print(f"serving host adb key on http://{host}:{port} — waiting for the phone",
           flush=True)
-    logging.info("serve_key listening on %s:%s (one request, then close)", host, port)
+    logging.info("serve_key listening on %s:%s (serves key, then closes)", host, port)
     try:
         # Long enough that the user can install and open the app without racing
         # the server. It still closes by itself so the endpoint does not linger.
-        done.wait(timeout=600)
-        if served["n"] == 0:
+        # Poll rather than wait(): the handler no longer signals an Event, so
+        # done.wait() would block for the full 10 minutes. Bounded by deadline.
+        while served["n"] == 0 and time.monotonic() < deadline:
+            time.sleep(0.5)
+        if served["n"] > 0:
+            print(f"  hand-over complete; staying up {int(GRACE)}s for retries",
+                  flush=True)
+            time.sleep(GRACE)
+        else:
             logging.warning("serve_key: timed out, no phone asked for the key")
             print("  timed out; nothing asked for the key", flush=True)
     except KeyboardInterrupt:
