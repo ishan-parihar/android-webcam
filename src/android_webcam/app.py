@@ -82,7 +82,7 @@ class App(Adw.Application):
         self.serve_btn.connect("clicked", self.on_serve)
         h = Gtk.Box(spacing=6); h.append(self.ping_btn); h.append(self.connect_btn)
         self.status_row.add_suffix(h)
-        grp_status = Adw.PreferencesGroup(title="Device", description="Redmi Note 8 Pro @ 192.168.1.12:5555 via adb TCP 5555")
+        grp_status = Adw.PreferencesGroup(title="Device", description="Redmi Note 8 Pro")
         grp_status.add(self.status_row)
         box.append(grp_status)
 
@@ -292,7 +292,12 @@ class App(Adw.Application):
         """
         import time as _t
         tgt_ip = self.cfg.get("android_ip")
-        tgt_port = int(self.cfg.get("android_port", 5555)) if self.cfg.get("android_port") else 5555
+        # 0 (or unset) means "ask the device". Android 13 wireless debugging
+        # binds a RANDOM port - this phone advertised adbd on 43203 - so a
+        # literal 5555 in config is a stale guess that produces "Connection
+        # refused" and burns two attempts before discovery runs.
+        cfg_port = int(self.cfg.get("android_port") or 0)
+        tgt_port = cfg_port or 5555
         shell_ok = False
 
         def try_target(ip, port, why):
@@ -345,15 +350,21 @@ class App(Adw.Application):
             return False
 
         # 1) try the configured target (with 1 retry after 1.5s — phone may be
-        # waking from doze and needs a moment for adbd to start listening)
-        for attempt in range(2):
-            if tgt_ip and try_target(tgt_ip, tgt_port, f"configured try {attempt+1}/2"):
-                shell_ok = True
-                break
-            if attempt == 0:
-                logging.info("configured target failed, waiting 1.5s and retrying…")
-                GLib.idle_add(self._set_status, f"Retrying {tgt_ip}:{tgt_port}…", "search")
-                _t.sleep(1.5)
+        # waking from doze and needs a moment for adbd to start listening).
+        # Skipped entirely when the port is unknown: without a real port, the
+        # only thing this can do is log "Connection refused" against a guess
+        # and delay discovery, which is the step that actually knows the port.
+        if cfg_port:
+            for attempt in range(2):
+                if tgt_ip and try_target(tgt_ip, tgt_port, f"configured try {attempt+1}/2"):
+                    shell_ok = True
+                    break
+                if attempt == 0:
+                    logging.info("configured target failed, waiting 1.5s and retrying…")
+                    GLib.idle_add(self._set_status, f"Retrying {tgt_ip}:{tgt_port}…", "search")
+                    _t.sleep(1.5)
+        else:
+            logging.info("no port configured; asking the device directly via mDNS")
 
         # 2) discover on failure — but only if we haven't already succeeded
         if not shell_ok:

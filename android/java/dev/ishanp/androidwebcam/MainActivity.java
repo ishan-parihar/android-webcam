@@ -305,12 +305,18 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Ask whether something is LISTENing on the adb port. /proc/net/tcp is
-     * world-readable, so this costs no root - unlike shelling out to su twenty
+     * Every port this phone is actually LISTENing on, from /proc/net/tcp.
+     *
+     * World-readable, so this costs no root - unlike shelling out to su twenty
      * times, which re-prompts for the Magisk/KernelSU dialog each round.
+     *
+     * Returns ALL listening ports, not just the adb one. Asserting a fixed 5555
+     * is wrong on this device: Android's wireless debugging binds a RANDOM
+     * port (observed 43203), so a check for 5555 could never pass and the app
+     * reported "not listening" on a phone that was serving fine.
      */
-    private boolean adbdListening() {
-        final String want = String.format("%04X", ADB_PORT);
+    private List<Integer> listeningPorts() {
+        List<Integer> out = new ArrayList<>();
         for (String f : new String[]{"/proc/net/tcp", "/proc/net/tcp6"}) {
             try (BufferedReader r = new BufferedReader(new InputStreamReader(
                     new java.io.FileInputStream(f)))) {
@@ -319,14 +325,49 @@ public class MainActivity extends Activity {
                 while ((line = r.readLine()) != null) {
                     if (first) { first = false; continue; }   // header
                     String[] col = line.trim().split("\\s+");
-                    if (col.length < 4) continue;
-                    // sl is hex "local_address", st is hex "0A" == LISTEN
-                    if (col[1].contains(":") && col[1].split(":")[1].equals(want)
-                            && col[3].equals("0A")) {
-                        return true;
-                    }
+                    if (col.length < 4 || !col[3].equals("0A")) continue;  // 0A = LISTEN
+                    int i = col[1].lastIndexOf(':');
+                    if (i < 0) continue;
+                    try { out.add(Integer.parseInt(col[1].substring(i + 1), 16)); }
+                    catch (NumberFormatException ignored) {}
                 }
             } catch (Exception ignored) {}
+        }
+        return out;
+    }
+
+    /**
+     * The port adbd is ACTUALLY on.
+     *
+     * Trust order matters here. getprop service.adb.tcp.port returns whatever
+     * was last SET - and provision() sets it to 5555 itself - so it reports
+     * 5555 on a phone whose adbd is really listening on 43203. Reading a value
+     * your own code wrote is not evidence. Real LISTEN sockets in
+     * /proc/net/tcp are the ground truth; getprop is only a fallback hint.
+     */
+    private int actualAdbPort() {
+        // Prefer a high port: on Android 13 wireless debugging adbd binds a
+        // RANDOM high port, and 5555 is frequently ALSO open (it is the
+        // wireless-debugging/MDM port). Picking 5555 when both are listening
+        // reports a port the host cannot connect to.
+        int best = -1;
+        for (int p : listeningPorts()) {
+            if (p == ADB_PORT || p > 1024) {
+                if (best < 0 || p > best) best = p;
+            }
+        }
+        if (best > 0) return best;
+        String prop = su("getprop service.adb.tcp.port").trim();
+        try {
+            int p = Integer.parseInt(prop);
+            if (p > 0) return p;
+        } catch (Exception ignored) {}
+        return ADB_PORT;
+    }
+
+    private boolean adbdListening() {
+        for (int p : listeningPorts()) {
+            if (p == ADB_PORT || p > 1024) return true;
         }
         return false;
     }
@@ -533,6 +574,7 @@ public class MainActivity extends Activity {
     private void autoConnect() {
         final String addr = myIp();
         Log2.dumpInterfaces();
+        Log2.i("listening ports: " + listeningPorts() + " actualAdbPort=" + actualAdbPort());
         Log2.i("launch: myIp=" + addr + " hasRoot=" + hasRoot()
                 + " adbdListening=" + adbdListening() + " keys=" + countKeys()
                 + " logPath=" + Log2.logPath());
@@ -627,8 +669,38 @@ public class MainActivity extends Activity {
 
             say("Found your computer at " + host + " (" + how + ")");
             Log2.i("provisioning with key from " + host);
-            provision(key, how);
+            provision(key, how, host);
         });
+    }
+
+    /**
+     * Publish this phone's adb endpoint as _adb-tcp._tcp so the host can find
+     * the real ip:port. The built-in _adb-tls-connect service is only published
+     * while Wireless debugging is actively running; this stays published after
+     * adbd is pinned to a fixed port.
+     */
+    private void advertiseAdb(int port) {
+        try {
+            NsdManager mgr = (NsdManager) getSystemService(Context.NSD_SERVICE);
+            if (mgr == null) return;
+            NsdServiceInfo info = new NsdServiceInfo();
+            info.setServiceName("android-webcam-adb");
+            info.setServiceType("_adb-tcp._tcp.");
+            info.setPort(port);
+            mgr.registerService(info, NsdManager.PROTOCOL_DNS_SD,
+                    new NsdManager.RegistrationListener() {
+                        @Override public void onServiceRegistered(NsdServiceInfo i) {
+                            Log2.i("registered _adb-tcp._tcp on port " + i.getPort());
+                        }
+                        @Override public void onRegistrationFailed(NsdServiceInfo i, int c) {
+                            Log2.i("adb advertisement failed code=" + c);
+                        }
+                        @Override public void onServiceUnregistered(NsdServiceInfo i) {}
+                        @Override public void onUnregistrationFailed(NsdServiceInfo i, int c) {}
+                    });
+        } catch (Exception e) {
+            Log2.i("advertise failed: " + e);
+        }
     }
 
     private int countKeys() {
@@ -648,9 +720,39 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** Tell the host where this phone actually is, so it does not have to guess. */
+    private void reportToHost(String hostAndPort) {
+        String[] hp = hostAndPort.split(":");
+        String host = hp[0];
+        int port = hp.length > 1 ? Integer.parseInt(hp[1]) : 7911;
+        int myPort = actualAdbPort();
+        String body = "{\"ip\":\"" + myIp() + "\",\"port\":" + myPort + "}";
+        try {
+            HttpURLConnection c = (HttpURLConnection)
+                    new URL("http://" + host + ":" + port + "/phone").openConnection();
+            c.setRequestMethod("POST");
+            c.setDoOutput(true);
+            c.setConnectTimeout(3000);
+            c.setReadTimeout(4000);
+            c.setRequestProperty("Content-Type", "application/json");
+            c.setRequestProperty("User-Agent", "android-webcam/1.0");
+            try (java.io.OutputStream os = c.getOutputStream()) {
+                os.write(body.getBytes(StandardCharsets.UTF_8));
+            }
+            int code = c.getResponseCode();
+            Log2.i("POST /phone ip=" + myIp() + " port=" + myPort + " -> " + code);
+        } catch (Exception e) {
+            Log2.i("POST /phone failed: " + e);
+        }
+    }
+
     // -------------------------------------------------------- provision
 
     private void provision(String key, String how) {
+        provision(key, how, null);
+    }
+
+    private void provision(String key, String how, String hostFrom) {
         bg.execute(() -> {
             if (!hasRoot()) {
                 ui.post(() -> {
@@ -687,13 +789,22 @@ public class MainActivity extends Activity {
             cmd.append("setprop persist.adb.tcp.port ").append(ADB_PORT).append("; ");
             cmd.append("stop adbd; start adbd; ");
             // Persist at boot into whichever hook dir this ROM uses.
-            cmd.append("mkdir -p ").append(hook).append("; ");
-            cmd.append("printf '%s\\n' '#!/system/bin/sh' ")
+            cmd.append("mkdir -p ").append(hook).append("; ");            cmd.append("printf '%s\\n' '#!/system/bin/sh' ")
                .append("'setprop service.adb.tcp.port ").append(ADB_PORT).append("' ")
                .append("'setprop persist.adb.tcp.port ").append(ADB_PORT).append("' ")
                .append("'stop adbd' 'start adbd' > ").append(hook).append("/adb_tcp.sh; ");
             cmd.append("chmod 0755 ").append(hook).append("/adb_tcp.sh");
             su(cmd.toString());
+            // Advertise the port we ACTUALLY ended up on. The host has no way
+            // to learn it otherwise: this adb build has no mdns support and
+            // avahi often sees nothing, so the host would otherwise guess 5555
+            // against a phone listening on a random port and fail forever.
+            final int advPort = actualAdbPort();
+            advertiseAdb(advPort);
+            Log2.i("advertising adb on port " + advPort);
+            // Close the loop: tell the host this phone's real ip:port so it
+            // connects here instead of guessing 5555 against a random port.
+            if (hostFrom != null) reportToHost(hostFrom);
 
             boolean wrote = su("grep -qxF '" + k + "' " + KEYS + " && echo yes || echo no")
                             .contains("yes");
@@ -710,23 +821,30 @@ public class MainActivity extends Activity {
                 }
             }
             final boolean isListening = listening;
+            // Report the port the DEVICE is actually on, not the one we asked
+            // for. On Android 13 wireless debugging keeps a random port, and
+            // `setprop service.adb.tcp.port 5555` may not take effect at all.
+            final int realPort = actualAdbPort();
             final String fHow = how;
             ui.post(() -> {
                 spinner.bar.setVisibility(View.GONE);
                 if (wrote && hookWrote && isListening) {
                     statusView.setText("Ready.\n\nYour computer can now use this phone as a "
                             + "webcam with no pairing. Press Start on the computer.");
-                    detailView.setText("This phone: " + myIp() + ":" + ADB_PORT
+                    detailView.setText("This phone: " + myIp() + ":" + realPort
                             + "  ·  found via " + fHow
                             + "  ·  trust store " + countKeys() + " key(s)");
                 } else {
                     statusView.setText("Not finished yet:\n"
                             + "  trusted key written: " + (wrote ? "yes" : "NO") + "\n"
                             + "  boot hook written:   " + (hookWrote ? "yes" : "NO") + "\n"
-                            + "  listening on " + ADB_PORT + ":   " + (isListening ? "yes" : "NO")
+                            + "  adbd listening:      " + (isListening ? "yes" : "NO")
+                            + " on port " + realPort
                             + "\n\nIf root was just granted, wait a few seconds and reopen.");
                 }
             });
+            Log2.i("provision wrote=" + wrote + " hook=" + hookWrote
+                    + " listening=" + isListening + " on port " + realPort);
         });
     }
 

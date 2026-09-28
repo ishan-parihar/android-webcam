@@ -437,6 +437,19 @@ def _known_adb_endpoints() -> list[tuple[str,int]]:
             time.sleep(2)
     except Exception: pass
 
+    # The phone app publishes its OWN _adb-tcp._tcp record once adbd is pinned.
+    # That is the reliable source of a real port: _adb-tls-connect is only
+    # advertised while Wireless debugging is actively running, and this adb
+    # build has no mdns support of its own.
+    try:
+        r = subprocess.run(["avahi-browse","-rpt","_adb-tcp._tcp"],
+                           capture_output=True, text=True, timeout=5)
+        for line in (r.stdout or "").splitlines():
+            if not line.startswith("=;"): continue
+            f = line.split(";")
+            if len(f) >= 9 and f[7].strip(): _add(f[7].strip(), f[8].strip())
+    except Exception: pass
+
     try:
         r = subprocess.run(["adb","devices"], capture_output=True, text=True, timeout=4)
         for line in (r.stdout or "").splitlines():
@@ -447,26 +460,49 @@ def _known_adb_endpoints() -> list[tuple[str,int]]:
     # The phone's mDNS hostname is the ONLY stable identifier across DHCP
     # changes - observed live: 192.168.1.6:43671 one minute, 192.168.1.4:43203
     # the next. The adb service name (adb-*.local) does not resolve on this
-    # LAN, but the device hostname (Android-2.local) does, reliably. Pair it
-    # with the Termux default port so a moved phone is found without mDNS.
+    # LAN, but the device hostname (Android-2.local) does, reliably.
+    #
+    # The PORT still comes from the _adb-tls-connect._tcp record above. Pairing
+    # it with a hardcoded 5555 here is what produced "Connection refused":
+    # Android 13 wireless debugging binds a random high port, never 5555.
+    # Fall back to 5555 only when mDNS gave us nothing at all.
     for _host in _phone_hostnames():
         try:
             r = subprocess.run(["avahi-resolve","-n",_host], capture_output=True, text=True, timeout=5)
+            # Reuse only REAL ports mDNS already reported. Picking known[0]
+            # blindly took a Docker container's address when the list had one.
+            real = [p for _, p in out]
             for line in (r.stdout or "").splitlines():
                 m = _re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", line)
-                if m: _add(m.group(1), 5555)
+                if not m: continue
+                if real:
+                    _add(m.group(1), real[0])
+                else:
+                    _add(m.group(1), 5555)
         except Exception: pass
 
+    # `ip neigh` is a LAST resort and carries NO port information - it just
+    # lists who is on the LAN. Emitting _add(ip, 5555) for every neighbour
+    # stamped a wrong port on every Docker container on this host (measured:
+    # 15 endpoints, all :5555, mostly 172.2x container addresses) and made
+    # discovery useless. Only offer these when mDNS told us nothing at all,
+    # and only for the WiFi subnet, never Docker/veth bridges.
+    _wifi = _lan_ip().rsplit(".", 1)[0] + "."
     try:
         r = subprocess.run(["ip","neigh","show"], capture_output=True, text=True, timeout=3)
         for line in (r.stdout or "").splitlines():
             # `ip neigh` prints "<ip> dev <iface> <state> [lladdr]" - iface
             # precedes the state, and FAILED/INCOMPLETE rows are stale noise.
-            m = _re.match(r"(\d{1,3}(?:\.\d{1,3}){3})\s+dev\s+\S+\s+(\w+)", line)
+            m = _re.match(r"(\d{1,3}(?:\.\d{1,3}){3})\s+dev\s+(\S+)\s+(\w+)", line)
             if not m: continue
-            ip, state = m.group(1), m.group(2)
+            ip, iface, state = m.group(1), m.group(2), m.group(3)
             if state in ("FAILED", "INCOMPLETE"): continue
-            if not ip.endswith(".1"): _add(ip, 5555)
+            # wlan only: br-*/veth*/docker are containers, never the phone.
+            if not iface.startswith(("wl", "wlp", "wlan")): continue
+            if not ip.startswith(_wifi): continue
+            if ip.endswith(".1"): continue
+            if not out:                       # no real port was observed
+                _add(ip, 5555)
     except Exception: pass
 
     return out
@@ -559,7 +595,7 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False)
                 for _line in (rr.stdout or "").splitlines():
                     m = _re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", _line)
                     if not m: continue
-                    for _p in (int(cfg.get("android_port", 5555) or 5555), 5555):
+                    for _p in sorted({int(cfg.get("android_port") or 0), 5555} - {0}):
                         r = _probe((m.group(1), _p))
                         if r: found.append(r)
             except Exception: pass
@@ -572,6 +608,25 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False)
         for _ip, _port in _known_adb_endpoints():
             r = _probe((_ip, _port))
             if r: found.append(r)
+    if not found:
+        # Address-only candidates must be PROBED, not stamped with a literal
+        # 5555: Android 13 wireless debugging binds a random high port, so a
+        # 5555 guess is a guaranteed "Connection refused". The only trustworthy
+        # source of a real port is the phone's own mDNS advertisement. When
+        # that is unavailable (adb built without mdns support, and avahi
+        # returning nothing) we genuinely do not know the port - say so rather
+        # than sweeping 254 hosts against a guess.
+        known = _known_adb_endpoints()
+        real_ports = {p for _, p in known if p and p != 5555}
+        if not real_ports:
+            return (False, "cannot determine the phone's adb port: it advertises a "
+                           "random port over mDNS and no advertisement was seen. "
+                           "Press 'Let phone in' and open the phone app so it can "
+                           "report its own address, or type ip:port in the host app.")
+        cands = list(known) + [(_ip, p) for _ip, _p in known for p in real_ports]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=96) as ex:
+            res = list(ex.map(_probe, cands))
+        found = [r for r in res if r]
     if not found:
         targets = [(f"{my_ip_prefix}.{i}", 5555) for i in range(1, 255)]
         with concurrent.futures.ThreadPoolExecutor(max_workers=96) as ex:
@@ -657,6 +712,14 @@ PROVISION_PORT = 7911
 SERVICE_TYPE = "_androidwebcam._tcp"
 
 
+def _is_ipv4(s: str) -> bool:
+    parts = s.split(".")
+    if len(parts) != 4: return False
+    for p in parts:
+        if not p.isdigit() or not (0 <= int(p) <= 255): return False
+    return True
+
+
 def _lan_ip() -> str:
         """This host's address on the LAN, so we bind one interface, not 0.0.0.0.
 
@@ -731,6 +794,48 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
     GRACE = 45          # outlives the phone's ~30s of retries
 
     class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            # The phone reports the ip:port it is ACTUALLY on. This is the
+            # reliable way for the host to learn the endpoint: mDNS is
+            # unreliable on many hosts (this one resolves nothing for either
+            # adb service), and Android 13 wireless debugging binds a random
+            # port that cannot be guessed. The phone already has an open HTTP
+            # connection to us, so it costs no new machinery.
+            if self.path.rstrip("/") != "/phone":
+                self.send_error(404); return
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                self.send_error(400); return
+            ip = str(data.get("ip", "")).strip()
+            try:
+                port = int(data.get("port", 0))
+            except (TypeError, ValueError):
+                port = 0
+            # Validate the ADDRESS too, not just the port. Port-only checks let
+            # "999.1.1.1" through and wrote it into config, where it became a
+            # connect target the host would keep retrying.
+            if not _is_ipv4(ip) or not (0 < port < 65536):
+                self.send_error(400); return
+            try:
+                from .config import load as _load, save as _save
+                cfg = _load()
+                cfg["android_ip"] = ip
+                cfg["android_port"] = port
+                _save(cfg)
+                logging.info("phone reported itself at %s:%s", ip, port)
+                print(f"  phone registered at {ip}:{port}", flush=True)
+            except Exception as e:
+                logging.warning("could not save phone endpoint: %s", e)
+                self.send_error(500); return
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
             if self.path.rstrip("/") not in ("/adbkey.pub", ""):
                 self.send_error(404); return

@@ -8,7 +8,7 @@ LEGACY_CONFIG = Path.home() / ".config" / "android-screen" / "config"
 
 DEFAULTS = {
     "android_ip": "192.168.1.12",
-    "android_port": 5555,
+    "android_port": 0,
     "camera_facing": "back",  # back/front
     "camera_id": None,        # overrides facing if set
     "resolution": "1080p",    # 720p/1080p (default = 1080p)
