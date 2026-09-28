@@ -169,7 +169,9 @@ public class MainActivity extends Activity {
         setupBtn.setOnClickListener(v -> {
             String k = keyInput.getText().toString().trim();
             if (k.isEmpty()) { statusView.setText("Paste the key first."); return; }
-            provision(k, "manual entry");
+            // Manual paste: no host address is known, so no /phone push.
+            // reportToHost is total and no-ops on null.
+            provision(k, "manual entry", null);
         });
         manualBox.addView(setupBtn, lpTop(dp(12)));
         col.addView(manualBox);
@@ -352,11 +354,18 @@ public class MainActivity extends Activity {
         // reports a port the host cannot connect to.
         int best = -1;
         for (int p : listeningPorts()) {
-            if (p == ADB_PORT || p > 1024) {
+            // 5555 included (a real, common adbd port), plus the wireless
+            // debugging range. Logging the full list keeps a wrong pick
+            // visible in diagnostics instead of silently asserting it.
+            if (p == ADB_PORT || (p >= 30000 && p <= 49999)) {
                 if (best < 0 || p > best) best = p;
             }
         }
-        if (best > 0) return best;
+        if (best > 0) {
+            Log2.i("actualAdbPort=" + best + " of listening=" + listeningPorts());
+            return best;
+        }
+        Log2.i("no adb port in listening set " + listeningPorts() + "; trying getprop");
         String prop = su("getprop service.adb.tcp.port").trim();
         try {
             int p = Integer.parseInt(prop);
@@ -367,7 +376,9 @@ public class MainActivity extends Activity {
 
     private boolean adbdListening() {
         for (int p : listeningPorts()) {
-            if (p == ADB_PORT || p > 1024) return true;
+            // Narrower than "any high port": an unrelated service on 40xxx
+            // must not be reported as adbd being up.
+            if (p == ADB_PORT || (p >= 30000 && p <= 49999)) return true;
         }
         return false;
     }
@@ -582,7 +593,7 @@ public class MainActivity extends Activity {
                 + (wifiIface() == null ? "none" : wifiIface().getName())
                 + " realPrefix=/" + prefixLength());
         ui.post(() -> addrView.setText("This phone: "
-                + (addr == null ? "no WiFi address" : addr + ":" + ADB_PORT)));
+                + (addr == null ? "no WiFi address" : addr + ":" + actualAdbPort())));
 
         bg.execute(() -> {
             // Fast path: already provisioned on a PREVIOUS run. It must check
@@ -722,12 +733,20 @@ public class MainActivity extends Activity {
 
     /** Tell the host where this phone actually is, so it does not have to guess. */
     private void reportToHost(String hostAndPort) {
-        String[] hp = hostAndPort.split(":");
-        String host = hp[0];
-        int port = hp.length > 1 ? Integer.parseInt(hp[1]) : 7911;
-        int myPort = actualAdbPort();
-        String body = "{\"ip\":\"" + myIp() + "\",\"port\":" + myPort + "}";
+        // Total: the null/empty check and BOTH parses live inside the try, so
+        // no future call site can throw out of here. An NPE here would abort
+        // provision() on the bg thread AFTER the trust key was written, which
+        // is strictly worse than the symptom this method exists to fix.
         try {
+            if (hostAndPort == null || hostAndPort.isEmpty()) {
+                Log2.i("POST /phone skipped: no host address known");
+                return;
+            }
+            String[] hp = hostAndPort.split(":");
+            String host = hp[0];
+            int port = hp.length > 1 ? Integer.parseInt(hp[1].trim()) : 7911;
+            int myPort = actualAdbPort();
+            String body = "{\"ip\":\"" + myIp() + "\",\"port\":" + myPort + "}";
             HttpURLConnection c = (HttpURLConnection)
                     new URL("http://" + host + ":" + port + "/phone").openConnection();
             c.setRequestMethod("POST");
@@ -747,10 +766,6 @@ public class MainActivity extends Activity {
     }
 
     // -------------------------------------------------------- provision
-
-    private void provision(String key, String how) {
-        provision(key, how, null);
-    }
 
     private void provision(String key, String how, String hostFrom) {
         bg.execute(() -> {
@@ -804,7 +819,7 @@ public class MainActivity extends Activity {
             Log2.i("advertising adb on port " + advPort);
             // Close the loop: tell the host this phone's real ip:port so it
             // connects here instead of guessing 5555 against a random port.
-            if (hostFrom != null) reportToHost(hostFrom);
+            reportToHost(hostFrom);
 
             boolean wrote = su("grep -qxF '" + k + "' " + KEYS + " && echo yes || echo no")
                             .contains("yes");

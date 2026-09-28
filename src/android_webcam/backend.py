@@ -813,6 +813,13 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
                 port = int(data.get("port", 0))
             except (TypeError, ValueError):
                 port = 0
+            # Only the peer that just fetched the key may write config. The
+            # server binds the LAN address, which is a weak guarantee for a
+            # WRITE; without this any host on the subnet can repoint discovery.
+            peer = self.client_address[0]
+            if not (_is_ipv4(peer) and peer.rsplit(".", 1)[0] == ip.rsplit(".", 1)[0]):
+                logging.warning("ignoring /phone from off-subnet peer %s", peer)
+                self.send_error(403); return
             # Validate the ADDRESS too, not just the port. Port-only checks let
             # "999.1.1.1" through and wrote it into config, where it became a
             # connect target the host would keep retrying.
