@@ -984,6 +984,18 @@ public class MainActivity extends Activity {
                     // idempotent, one extra su, and it is the only place a
                     // provisioned-but-unmigrated device gets repaired.
                     ensureManagerAuthorizedKey();
+                    // Advertise here too. advertiseAdb() lived only inside
+                    // provision(), so an already-trusted phone - every launch
+                    // after the first - published nothing and the host had no
+                    // mDNS record to find. Without it a host-side discovery
+                    // failure is indistinguishable from a network fault.
+                    int fastPort = actualAdbPort();
+                    if (fastPort > 0) {
+                        Log2.i("advertising adb on port " + fastPort);
+                        advertiseAdb(fastPort);
+                    } else {
+                        Log2.i("not advertising: adb port unverified");
+                    }
                     ui.post(() -> done("Ready — your computer can use this phone as a "
                             + "webcam. " + keys + " trusted computer(s)."));
                     // WAKE_LOCK is now granted, so this lock is really held
