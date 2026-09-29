@@ -766,10 +766,19 @@ public class MainActivity extends Activity {
                 getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
                 if (pm != null) {
-                    wifiLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
-                                              "android-webcam:discovery");
-                    wifiLock.setReferenceCounted(false);
-                    wifiLock.acquire(10 * 60 * 1000L);   // safety timeout
+                    // Its own try: a SecurityException here must NOT abort the
+                    // su call below, which is the part that actually holds
+                    // WiFi open across a scan. Losing the lock is survivable;
+                    // losing the su setting is what made scans untrustworthy.
+                    try {
+                        wifiLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
+                                                  "android-webcam:discovery");
+                        wifiLock.setReferenceCounted(false);
+                        wifiLock.acquire(10 * 60 * 1000L);   // safety timeout
+                    } catch (Exception le) {
+                        Log2.i("wake lock unavailable (" + le + "); "
+                                + "continuing - the su setting below is what matters");
+                    }
                 }
                 // The su setting is the part that survives an AP deauth: the
                 // screen flag only applies while this app is foreground, and

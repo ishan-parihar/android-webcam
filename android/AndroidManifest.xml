@@ -9,6 +9,12 @@
     <!-- Own IP, subnet prefix length, and multicast lock for mDNS browsing. -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- keepAwake() acquires a PARTIAL_WAKE_LOCK. Without this the acquire
+         throws SecurityException, which aborts the method before the su call
+         below it runs - so the WiFi setting that actually survives an AP
+         deauth was silently never applied. Log-proven: "keepAwake(true)
+         failed: ... has android.permission.WAKE_LOCK". -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:label="Android Webcam"
