@@ -75,6 +75,9 @@ public class MainActivity extends Activity {
     // standard adb announcement, which invites every adb client on the LAN to
     // connect to a root-pinned adbd. See advertiseAdb().
     private static final String ADB_SERVICE_TYPE = "_androidwebcam-adb._tcp.";
+    // The host public key, set when provision() fetches it. Null on the fast
+    // path, where ensureManagerAuthorizedKey() falls back to the trust file.
+    private volatile String pendingHostKey;
 
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -789,10 +792,85 @@ public class MainActivity extends Activity {
      * keeps the association alive; both are set because they cover different
      * states (screen lit vs radio idle).
      */
+    /**
+     * Make sure AdbDebuggingManager's OWN key list contains the host key.
+     *
+     * There are two authorization stores on Android. adbd reads the FILE at
+     * /data/misc/adb/adb_keys. The USB-debugging PROMPT is owned by
+     * AdbDebuggingManager in system_server, which keeps a separate list in
+     * `settings secure authorized_adb_keys`. Writing only the file leaves the
+     * prompt firing on every inbound connect even though adbd says "adb
+     * client authorized" - measured: 27 "Received public key" events, every one
+     * carrying the key adbd had already authorized.
+     *
+     * Idempotent: the key is appended only when absent, and the list is
+     * rewritten sorted and de-duplicated so repeated runs cannot grow it.
+     */
+    private void ensureManagerAuthorizedKey() {
+        // The key must be the HOST's - the one that produced the prompts and
+        // the one adbd already trusts. Two sources, in order:
+        //  1. the host key we just fetched from :7911 (provision path)
+        //  2. the trust file itself, on the fast path where nothing was
+        //     fetched. adbd authorizes precisely the principals listed in
+        //     /data/misc/adb/adb_keys, so its contents ARE the hosts to
+        //     publish. Reading the DEVICE's own ~/.android/adbkey.pub instead
+        //     would authorize the phone to itself - a different principal that
+        //     can never match the connecting host, and a green check on the
+        //     wrong thing.
+        // Collect EVERY trusted host key, not just the first. A second host in
+        // the file that we skipped would keep prompting - the same bug.
+        List<String> keys = new ArrayList<>();
+        if (pendingHostKey != null && !pendingHostKey.trim().isEmpty()) {
+            keys.add(pendingHostKey.trim().split("\\s+")[0]);
+        } else {
+            for (String line : su("cat " + KEYS).split("\n")) {
+                String t = line.trim();
+                if (!t.isEmpty()) {
+                    String kk = t.split("\\s+")[0];
+                    if (!kk.isEmpty() && !keys.contains(kk)) keys.add(kk);
+                }
+            }
+        }
+        if (keys.isEmpty()) {
+            // Writing an empty value would CLEAR a store that is already
+            // correct, so do nothing and say so.
+            Log2.i("manager key: no host key available; leaving store untouched");
+            return;
+        }
+        // Build the union in the shell: existing store plus every key we hold,
+        // then one sorted, de-duplicated write. The grep -qxF guard makes each
+        // append conditional, so repeated runs cannot grow the list.
+        StringBuilder add = new StringBuilder();
+        for (String k : keys) {
+            add.append("K='").append(k.replace("'", "'\\''")).append("'; ")
+               .append("settings get secure authorized_adb_keys 2>/dev/null "
+                     + "| tr ' ' '\\n' | grep -qxF \"$K\" || "
+                     + "settings put secure authorized_adb_keys "
+                     + "\"$( (settings get secure authorized_adb_keys; echo $K) "
+                     + "| tr ' ' '\\n' | grep -vxF '' | grep -vxF null "
+                     + "| sort -u | tr '\\n' ' ')\"; ");
+        }
+        String after = su(add + "settings get secure authorized_adb_keys").trim();
+        // Compare the RAW keys, not the shell-escaped ones: 'x'\''y' would
+        // never match the stored value and would report a false ABSENT.
+        int found = 0;
+        for (String k : keys) {
+            if ((" " + after + " ").contains(" " + k + " ")) found++;
+        }
+        Log2.i("manager key: " + found + "/" + keys.size()
+                + " host key(s) present in secure authorized_adb_keys"
+                + (found == keys.size() ? "" : "  ABSENT"));
+    }
+
     private void keepAwake(boolean on) {
         try {
             if (on) {
-                getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                // Window flags are View state: they MUST be touched on the UI
+                // thread, and every release call site runs on the bg executor.
+                // Doing it here threw CalledFromWrongThreadException and, worse,
+                // aborted the method before the wake lock was released.
+                runOnUiThread(() ->
+                        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
                 PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
                 if (pm != null) {
                     // Its own try: a SecurityException here must NOT abort the
@@ -819,7 +897,10 @@ public class MainActivity extends Activity {
                         + " wifi_sleep_never_warn=" + r.trim()
                         + " (1 = wifi will not sleep mid-scan)");
             } else {
-                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                runOnUiThread(() ->
+                        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
+                // A wake lock is not view state, so release it inline: deferring
+                // it to the UI thread would leave it held until that thread ran.
                 if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
                 Log2.i("keepAwake off: screen flag cleared, lock released");
             }
@@ -896,6 +977,13 @@ public class MainActivity extends Activity {
             if (hasRoot() && adbdListening()) {
                 int keys = countKeys();
                 if (keys > 0) {
+                    // An already-trusted phone NEVER reaches provision(), so
+                    // the AdbDebuggingManager store would never be written and
+                    // the USB-debugging prompt would keep coming back on an
+                    // install that should be fully set up. Re-assert it here:
+                    // idempotent, one extra su, and it is the only place a
+                    // provisioned-but-unmigrated device gets repaired.
+                    ensureManagerAuthorizedKey();
                     ui.post(() -> done("Ready — your computer can use this phone as a "
                             + "webcam. " + keys + " trusted computer(s)."));
                     // WAKE_LOCK is now granted, so this lock is really held
@@ -1106,24 +1194,11 @@ public class MainActivity extends Activity {
             // Strip the trailing comment and single-quote for the shell.
             String k = key.split("\\s+")[0].replaceAll("(@.*)$", "")
                            .replace("'", "'\\''");
+            // Hand the fetched host key to the AdbDebuggingManager write, so
+            // it publishes this host rather than whatever the file happens to
+            // list at this instant.
+            pendingHostKey = k.replace("'\\''", "'");
             StringBuilder cmd = new StringBuilder();
-            // TWO authorization stores, and writing only one is why the phone
-            // still prompts. adbd reads the FILE at /data/misc/adb/adb_keys and
-            // logged "adb client authorized" for our key, while the UI prompt
-            // kept coming from AdbDebuggingManager (system_server), which owns
-            // a SEPARATE store in `settings get secure authorized_adb_keys`.
-            // On this device that setting was null - we never wrote it - so
-            // every inbound connect was untrusted to the component that
-            // actually shows the dialog. Hence 27 "Received public key"
-            // events, all the same already-trusted key.
-            String bare = k.replace("'\\''", "'");
-            cmd.append("K='").append(bare).append("'; ");
-            // Idempotent append: only add when absent, in a space-separated list.
-            cmd.append("settings get secure authorized_adb_keys 2>/dev/null | tr ' ' '\\n' "
-                     + "| grep -qxF \"$K\" || "
-                     + "settings put secure authorized_adb_keys "
-                     + "\"$( (settings get secure authorized_adb_keys; echo $K) "
-                     + "| tr ' ' '\\n' | grep -vxF '' | sort -u | tr '\\n' ' ')\"; ");
             cmd.append("mkdir -p $(dirname ").append(KEYS).append("); ");
             cmd.append("[ -f ").append(KEYS).append(" ] || : > ").append(KEYS).append("; ");
             // IDEMPOTENCY: append ONLY when absent. An unconditional append adds
@@ -1149,6 +1224,9 @@ public class MainActivity extends Activity {
                .append("'stop adbd' 'start adbd' > ").append(hook).append("/adb_tcp.sh; ");
             cmd.append("chmod 0755 ").append(hook).append("/adb_tcp.sh");
             su(cmd.toString());
+            // The FILE store is now written; the PROMPT's store is separate and
+            // lives in a setting, so it needs its own call.
+            ensureManagerAuthorizedKey();
             // Advertise the port we ACTUALLY ended up on. The host has no way
             // to learn it otherwise: this adb build has no mdns support and
             // avahi often sees nothing, so the host would otherwise guess 5555
