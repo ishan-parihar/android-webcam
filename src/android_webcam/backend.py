@@ -765,7 +765,8 @@ def _default_gateway() -> str:
 
 
 def serve_key(host: str | None = None, port: int = PROVISION_PORT,
-              advertise: bool = True, once: bool = True) -> None:
+              advertise: bool = True, once: bool = True,
+              grace: int | None = None) -> None:
     """Advertise this host and hand the phone its adb PUBLIC key over the LAN.
 
     This is what removes the last manual step: the key is 715 chars of base64
@@ -791,7 +792,7 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
 
     served = {"n": 0, "peer": "-"}
     deadline = time.monotonic() + 600
-    GRACE = 45          # outlives the phone's ~30s of retries
+    GRACE = grace if grace is not None else 45   # outlives the phone's ~30s of retries
 
     class H(BaseHTTPRequestHandler):
         def do_POST(self):
