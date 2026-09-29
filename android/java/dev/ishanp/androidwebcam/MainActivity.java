@@ -374,6 +374,14 @@ public class MainActivity extends Activity {
         return ADB_PORT;
     }
 
+    /** Bring adbd up on a fixed port with root. Returns once the command ran. */
+    private void startAdbd() {
+        String r = su("setprop service.adb.tcp.port " + ADB_PORT + "; "
+                    + "setprop persist.adb.tcp.port " + ADB_PORT + "; "
+                    + "stop adbd; start adbd;");
+        Log2.i("startAdbd rc=[" + r.trim() + "]");
+    }
+
     private boolean adbdListening() {
         for (int p : listeningPorts()) {
             // Narrower than "any high port": an unrelated service on 40xxx
@@ -566,8 +574,10 @@ public class MainActivity extends Activity {
                         : "Answered: " + liveCopy
                           + "\n\nTrying to fetch the key…")));
             if (live.isEmpty()) {
-                Log2.i("scan: nothing listening on 7911. Is 'Trust this computer' pressed "
-                        + "on the host, and is this phone on the SAME wifi/subnet?");
+                Log2.i("scan: nothing listening on 7911. adbdListening="
+                        + adbdListening() + " ports=" + listeningPorts()
+                        + " - check the host app has 'Let phone in' pressed, and that "
+                        + "this phone is on the SAME wifi/subnet as the host.");
                 return null;
             }
             for (String c : live) {
@@ -602,6 +612,23 @@ public class MainActivity extends Activity {
             // wireless-debugging daemon listens, so "adbd is up" alone would
             // report Ready with an empty trust store - the exact stuck state.
             //
+            // If adbd is not running, START IT before scanning. Measured on
+            // device: with adbd down, listeningPorts() returns [] and every
+            // sweep reports "253 addrs tried, live on 7911 = []" - the phone
+            // was knocking on a closed door, and the failure message blamed
+            // the host ("Is 'Trust this computer' pressed?"). There is
+            // nothing to provision until adbd is up, so bring it up first.
+            if (hasRoot() && !adbdListening()) {
+                Log2.i("adbd not running; starting it on " + ADB_PORT);
+                startAdbd();
+                // adbd takes a moment to bind; poll rather than assume.
+                for (int i = 0; i < 10 && !adbdListening(); i++) {
+                    try { Thread.sleep(400); } catch (InterruptedException ignored) {}
+                }
+                Log2.i("after start: adbdListening=" + adbdListening()
+                        + " ports=" + listeningPorts());
+            }
+
             // countKeys() shells out to su, so call it once and reuse the value.
             if (hasRoot() && adbdListening()) {
                 int keys = countKeys();

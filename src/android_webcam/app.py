@@ -356,7 +356,7 @@ class App(Adw.Application):
             if _wait_device_ready(ip, port, timeout=1.0) and _adb_shell_echo(ip, port, timeout=3.0):
                 logging.info("try_target %s:%d (%s): already ready, no connect needed", ip, port, why)
                 self.persist(android_ip=ip, android_port=port)
-                self._show_endpoint()
+                GLib.idle_add(self._show_endpoint)
                 return True
             # 2) need to (re)connect — but DON'T disconnect first (that kills
             # an existing good connection and forces re-auth). Just connect.
@@ -381,7 +381,7 @@ class App(Adw.Application):
                 self.cfg["android_ip"] = ip
                 self.cfg["android_port"] = port
                 self.persist(android_ip=ip, android_port=port)
-                self._show_endpoint()
+                GLib.idle_add(self._show_endpoint)
                 return True
                 logging.warning("shell echo failed: %s:%d attempt %d", ip, port, attempt+1)
                 _t.sleep(0.8)
