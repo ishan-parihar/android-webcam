@@ -612,6 +612,14 @@ public class MainActivity extends Activity {
             // it answers one question only: can the phone's TCP stack reach
             // the LAN at all? The per-exception tally below is the measurement
             // that covers the real host.
+            // hostIp is null when the phone has no usable IPv4 (cellular-only),
+            // and InetSocketAddress(null, port) throws into the catch-all,
+            // logging a misleading "gateway probe null:7911 failed" on every
+            // sweep. Skip the probe rather than report a failure that is
+            // really a missing argument.
+            if (gateway == null) {
+                Log2.i("gateway probe skipped: no gateway address derivable");
+            } else {
             try (Socket s = new Socket()) {
                 s.connect(new InetSocketAddress(gateway, 7911), 3000);
                 Log2.i("gateway probe " + gateway + ":7911 CONNECTED");
@@ -625,6 +633,7 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 Log2.i("gateway probe " + gateway + ":7911 failed: " + e
                         + "; route: " + su("ip route get " + gateway).trim().replace('\n', ' '));
+            }   // end gateway != null
             }
             ExecutorService pool = Executors.newFixedThreadPool(64);
         try {
