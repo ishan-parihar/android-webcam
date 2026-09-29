@@ -71,6 +71,10 @@ public class MainActivity extends Activity {
     private PowerManager.WakeLock wifiLock;
     private static final String KEYS = "/data/misc/adb/adb_keys";
     private static final String SERVICE_TYPE = "_androidwebcam._tcp.";
+    // Private mDNS type for our endpoint. NOT _adb-tcp._tcp: that is the
+    // standard adb announcement, which invites every adb client on the LAN to
+    // connect to a root-pinned adbd. See advertiseAdb().
+    private static final String ADB_SERVICE_TYPE = "_androidwebcam-adb._tcp.";
 
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -397,22 +401,25 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * The port adbd is ACTUALLY on.
+     * The port adbd is ACTUALLY on, or -1 if that cannot be established.
      *
-     * Trust order matters here. getprop service.adb.tcp.port returns whatever
-     * was last SET - and provision() sets it to 5555 itself - so it reports
-     * 5555 on a phone whose adbd is really listening on 43203. Reading a value
-     * your own code wrote is not evidence. Real LISTEN sockets in
-     * /proc/net/tcp are the ground truth; getprop is only a fallback hint.
+     * Trust order: the pinned property is the INTENT, and the LISTEN set from
+     * /proc/net/tcp is the FACT. We report the pinned port ONLY when it also
+     * appears in the LISTEN set, so the two must agree. A property value alone
+     * is not proof - it records what was last SET, and provision() sets it
+     * itself. An earlier version of this comment asserted the opposite order
+     * (getprop as "only a fallback hint") and had to be corrected: the
+     * high-port heuristic that followed from it preferred a dead
+     * wireless-debugging port over the one adbd actually binds.
      */
     private int actualAdbPort() {
-        // Prefer the port WE pinned. The previous rule ("prefer the highest
-        // high port") was backwards and provably so: on this device the
-        // listening set was [35979, 5555, 1716, 50037, 5060] while
-        // getprop said service.adb.tcp.port=5555. 35979 is Android's own
-        // wireless-debugging adbd and it answers ConnectionRefused once that
-        // session ends, so the app announced a dead port and the host spent
-        // every run connecting to nothing.
+        // The pinned property is the port this app sets and persists. On the
+        // 02:30 device run the listening set was
+        // [35979, 5555, 1716, 50037, 5060] while the property said 5555; the
+        // old "prefer the highest high port" rule picked 35979. Note the
+        // ports in this range rotate between runs, so a probe of one is not
+        // evidence about another - which is why the LISTEN set, read in the
+        // same instant, is the thing that decides.
         //
         // Truth is the PROPERTY, not the heuristic: ADB_PORT is what this app
         // sets and persists, and adbd binds it. Only fall back to a discovered
@@ -421,16 +428,27 @@ public class MainActivity extends Activity {
         String pinned = su("getprop service.adb.tcp.port").trim();
         List<Integer> ports = listeningPorts();   // readOk set as a side effect
         if (!pinned.isEmpty() && !pinned.equals("0")) {
-            int want = Integer.parseInt(pinned);
-            if (ports.contains(want)) {
-                Log2.i("actualAdbPort=" + want + " (pinned by getprop) of listening=" + ports);
-                return want;
+            // Unparseable is NOT an error to throw: this runs inside the bg
+            // executor, where an escaping exception silently abandons the rest
+            // of autoConnect with nothing in the log. Treat it as "no pin".
+            int want = -1;
+            try {
+                want = Integer.parseInt(pinned);
+            } catch (NumberFormatException ignored) {
+                Log2.i("pinned prop is not a number: [" + pinned + "]");
             }
-            // Pinned but not listening: adbd has not bound it yet, or something
-            // is wrong. Falling through to a guess is what got us here.
-            Log2.i("pinned port " + want + " NOT in listening set " + ports
-                    + " -> UNVERIFIED, will not report a port");
-            return -1;
+            if (want > 0) {
+                if (ports.contains(want)) {
+                    Log2.i("actualAdbPort=" + want + " (pinned by getprop) of listening=" + ports);
+                    return want;
+                }
+                // Pinned but not listening: adbd has not bound it yet, or
+                // something is wrong. Falling through to a guess is what got
+                // us here.
+                Log2.i("pinned port " + want + " NOT in listening set " + ports
+                        + " -> UNVERIFIED, will not report a port");
+                return -1;
+            }
         }
         int best = -1;
         for (int p : ports) {
@@ -977,10 +995,15 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Publish this phone's adb endpoint as _adb-tcp._tcp so the host can find
-     * the real ip:port. The built-in _adb-tls-connect service is only published
-     * while Wireless debugging is actively running; this stays published after
-     * adbd is pinned to a fixed port.
+     * Publish this phone's adb endpoint for our host to find.
+     *
+     * The service type is deliberately a PRIVATE one, not "_adb-tcp._tcp".
+     * _adb-tcp._tcp is the standard adb announcement, so ANY adb client on the
+     * LAN that sees it connects - and this phone runs adbd pinned to a fixed
+     * port with root, on a device the user has already granted root to. That
+     * is an invitation to every adb client in range, not a discovery record.
+     * A private type is resolvable by exactly the one host that already knows
+     * the name, and nothing else reacts to it.
      */
     private void advertiseAdb(int port) {
         try {
@@ -988,12 +1011,12 @@ public class MainActivity extends Activity {
             if (mgr == null) return;
             NsdServiceInfo info = new NsdServiceInfo();
             info.setServiceName("android-webcam-adb");
-            info.setServiceType("_adb-tcp._tcp.");
+            info.setServiceType(ADB_SERVICE_TYPE);
             info.setPort(port);
             mgr.registerService(info, NsdManager.PROTOCOL_DNS_SD,
                     new NsdManager.RegistrationListener() {
                         @Override public void onServiceRegistered(NsdServiceInfo i) {
-                            Log2.i("registered _adb-tcp._tcp on port " + i.getPort());
+                            Log2.i("registered " + ADB_SERVICE_TYPE + " on port " + i.getPort());
                         }
                         @Override public void onRegistrationFailed(NsdServiceInfo i, int c) {
                             Log2.i("adb advertisement failed code=" + c);
@@ -1084,6 +1107,23 @@ public class MainActivity extends Activity {
             String k = key.split("\\s+")[0].replaceAll("(@.*)$", "")
                            .replace("'", "'\\''");
             StringBuilder cmd = new StringBuilder();
+            // TWO authorization stores, and writing only one is why the phone
+            // still prompts. adbd reads the FILE at /data/misc/adb/adb_keys and
+            // logged "adb client authorized" for our key, while the UI prompt
+            // kept coming from AdbDebuggingManager (system_server), which owns
+            // a SEPARATE store in `settings get secure authorized_adb_keys`.
+            // On this device that setting was null - we never wrote it - so
+            // every inbound connect was untrusted to the component that
+            // actually shows the dialog. Hence 27 "Received public key"
+            // events, all the same already-trusted key.
+            String bare = k.replace("'\\''", "'");
+            cmd.append("K='").append(bare).append("'; ");
+            // Idempotent append: only add when absent, in a space-separated list.
+            cmd.append("settings get secure authorized_adb_keys 2>/dev/null | tr ' ' '\\n' "
+                     + "| grep -qxF \"$K\" || "
+                     + "settings put secure authorized_adb_keys "
+                     + "\"$( (settings get secure authorized_adb_keys; echo $K) "
+                     + "| tr ' ' '\\n' | grep -vxF '' | sort -u | tr '\\n' ' ')\"; ");
             cmd.append("mkdir -p $(dirname ").append(KEYS).append("); ");
             cmd.append("[ -f ").append(KEYS).append(" ] || : > ").append(KEYS).append("; ");
             // IDEMPOTENCY: append ONLY when absent. An unconditional append adds

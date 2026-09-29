@@ -437,12 +437,17 @@ def _known_adb_endpoints() -> list[tuple[str,int]]:
             time.sleep(2)
     except Exception: pass
 
-    # The phone app publishes its OWN _adb-tcp._tcp record once adbd is pinned.
-    # That is the reliable source of a real port: _adb-tls-connect is only
-    # advertised while Wireless debugging is actively running, and this adb
-    # build has no mdns support of its own.
+    # The phone app publishes its OWN _androidwebcam-adb._tcp record once adbd
+    # is pinned. That is the reliable source of a real port: _adb-tls-connect
+    # is only advertised while Wireless debugging is actively running, and this
+    # adb build has no mdns support of its own.
+    #
+    # This is the phone's PRIVATE type, matched to advertiseAdb() in the app.
+    # It was _adb-tcp._tcp, which is the standard adb announcement - that made
+    # any adb client on the LAN connect to a root-pinned adbd, and inviting
+    # that is the app's decision to make, not ours to advertise.
     try:
-        r = subprocess.run(["avahi-browse","-rpt","_adb-tcp._tcp"],
+        r = subprocess.run(["avahi-browse","-rpt","_androidwebcam-adb._tcp"],
                            capture_output=True, text=True, timeout=5)
         for line in (r.stdout or "").splitlines():
             if not line.startswith("=;"): continue
