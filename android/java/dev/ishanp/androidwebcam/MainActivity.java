@@ -942,11 +942,11 @@ public class MainActivity extends Activity {
             say("Found your computer at " + host + " (" + how + ")");
             Log2.i("provisioning with key from " + host);
             provision(key, how, host);
-            // Released AFTER provision(), not before: provisioning is what
-            // writes the trust store and restarts adbd, so releasing earlier
-            // would let the device sleep through the one step that must not
-            // be interrupted. onDestroy is the backstop.
-            keepAwake(false);   // discovery and provisioning both done
+            // NO release here. We are already running ON the single-thread
+            // bg executor, and provision() queues its work onto that same
+            // executor - so a release at this line fires before provisioning
+            // has done anything. The release lives at the end of
+            // provision()'s own body instead.
         });
     }
 
@@ -1049,6 +1049,7 @@ public class MainActivity extends Activity {
                     spinner.bar.setVisibility(View.GONE);
                     manualBox.setVisibility(View.VISIBLE);
                 });
+                keepAwake(false);   // no root: cannot provision, stop holding
                 return;
             }
 
@@ -1139,6 +1140,10 @@ public class MainActivity extends Activity {
             });
             Log2.i("provision wrote=" + wrote + " hook=" + hookWrote
                     + " listening=" + isListening + " on port " + realPort);
+            // Last statement of the work that matters, not of its caller:
+            // the caller is already ON the single-thread bg executor, so a
+            // release there fires before any of this has run.
+            keepAwake(false);   // provisioned; onDestroy is the backstop
         });
     }
 

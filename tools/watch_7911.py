@@ -6,15 +6,16 @@ cannot see a SYN that is later dropped - it only observes connections that
 COMPLETE. On its own it therefore cannot separate "the SYN never arrived"
 from "it arrived and was dropped", which is the whole ambiguity.
 
-The counters close that gap without privileges. TCP_IN_SEGS counts inbound
-segments including bare SYNs, so around a phone run:
+A raw AF_PACKET socket needs root and tcpdump is not installed here, so this
+CANNOT see a SYN that is later dropped. It reports one thing only: whether a
+TCP session was established. Silence here means no session, and the reason
+must come from the phone's own route/neigh lines or a privileged capture.
 
-  TcpInSegs rises, no CONNECTION printed -> packets ARE arriving and being
-                                           dropped before the session forms
-  TcpInSegs flat                         -> the SYN never reached this host
-
-Run `nstat -az TcpInSegs TcpExtListenDrops` before and after, or let this
-script print the delta itself with --nstat.
+The counters are printed for context but CANNOT attribute a segment to port
+7911. TcpInSegs is system-wide, so this host's own SSH, DNS and background
+scans move it during any window. A delta of zero or a large delta are both
+uninformative about the phone. They are printed, clearly labelled, only so
+nobody re-derives the same dead end.
 
 Usage:  python3 watch_7911.py [seconds] [--nstat]
 """
@@ -85,16 +86,16 @@ def main() -> None:
     if want_nstat:
         segs = after.get("TcpInSegs", 0) - before.get("TcpInSegs", 0)
         outr = after.get("TcpOutRsts", 0) - before.get("TcpOutRsts", 0)
-        fails = after.get("TcpAttemptFails", 0) - before.get("TcpAttemptFails", 0)
-        print(f"  TcpInSegs        +{segs}   (inbound segments, incl. bare SYNs)")
-        print(f"  TcpOutRsts       +{outr}   (RSTs we sent = we rejected something)")
-        print(f"  TcpAttemptFails  +{fails}  (our SYN retries)")
-        if seen == 0 and segs > 0:
-            print("  => segments ARRIVED but no session formed: dropped in the "
-                  "host's input path", flush=True)
-        elif seen == 0 and segs == 0:
-            print("  => no segments arrived at all: the SYN never reached this "
-                  "host", flush=True)
+        print(f"  [context only, NOT attributable to port 7911]", flush=True)
+        print(f"    TcpInSegs system-wide  +{segs}", flush=True)
+        print(f"    TcpOutRsts system-wide +{outr}", flush=True)
+        print("  TcpInSegs is system-wide: this host's own traffic moves it, so "
+              "no reading here proves or disproves anything about the phone.",
+              flush=True)
+    if seen == 0:
+        print("  RESULT: no session was established. That is the only thing "
+              "this tool can conclude; the cause is not visible here.",
+              flush=True)
 
 
 if __name__ == "__main__":
