@@ -614,6 +614,24 @@ public class MainActivity extends Activity {
      * Returns "ip:port" or null. Logging here is what makes a failed run
      * diagnosable instead of a guess.
      */
+    /** A candidate host in the phone's own /24, for the control probe. */
+    private String deriveHost() {
+        String a = myIp();
+        return (a != null && a.contains(".")) ? a.substring(0, a.lastIndexOf('.')) + ".13" : null;
+    }
+
+    /** 0 = connected, -1 = refused, -2 = timed out. The outcome is the data. */
+    private int probeHostPort(String host, int port) throws Exception {
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(host, port), 2500);
+            return 0;
+        } catch (java.net.SocketTimeoutException e) {
+            return -2;
+        } catch (java.net.ConnectException e) {
+            return -1;
+        }
+    }
+
     private String sweepForHost(String addr, String gateway) {
             // Probe the SUBNET GATEWAY, derived from the phone's own address
             // rather than hardcoded, so this works on any network. This does
@@ -629,6 +647,36 @@ public class MainActivity extends Activity {
             if (gateway == null) {
                 Log2.i("gateway probe skipped: no gateway address derivable");
             } else {
+            // The decisive control, run BEFORE the 7911 probe. Probe the host
+            // on a port that is definitely OPEN (sshd) and one that is
+            // definitely CLOSED. Only a connect-in to the host proves the
+            // phone can reach it - the host dialling out proves nothing about
+            // the reverse direction, which is the direction the sweep uses.
+            //   22 connects, 631 times out  -> host reachable, that port filtered
+            //   22 times out                 -> cannot reach the host at all
+            // A closed port normally answers with an RST ("refused"); a
+            // timeout instead means nothing came back, which is what a
+            // filtered path looks like from inside.
+            int lastCode = 0;
+            try {
+                lastCode = probeHostPort(deriveHost(), 22);
+                Log2.i("control probe " + deriveHost() + ":22 (sshd, OPEN on this host) -> " + lastCode);
+            } catch (Exception e) {
+                Log2.i("control probe " + deriveHost() + ":22 failed: " + e);
+            }
+            try {
+                // 31337 is verified CLOSED on this host, so a timeout here is
+                // meaningful: a closed port should answer with an RST
+                // ("refused"), and silence instead means the path drops.
+                Log2.i("control probe " + deriveHost() + ":31337 (verified CLOSED) -> "
+                        + probeHostPort(deriveHost(), 31337));
+            } catch (Exception e) {
+                Log2.i("control probe " + deriveHost() + ":31337 failed: " + e);
+            }
+            // ARP state of the gateway: REACHABLE/STALE means the phone CAN
+            // resolve the LAN, so a timeout is filtering. FAILED/INCOMPLETE
+            // means it genuinely cannot reach the /24.
+            Log2.i("  neigh gw: " + su("ip neigh show " + gateway).trim());
             try (Socket s = new Socket()) {
                 s.connect(new InetSocketAddress(gateway, 7911), 3000);
                 Log2.i("gateway probe " + gateway + ":7911 CONNECTED");
