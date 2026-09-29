@@ -62,6 +62,10 @@ public class MainActivity extends Activity {
 
     /** Kept in sync with adb-webcam's default; must match the host. */
     private static final int ADB_PORT = 5555;
+    /** True only when a real LISTEN row was parsed - not merely when the
+     *  read returned cleanly. An unreadable /proc/net/tcp must never be
+     *  mistaken for "nothing is listening". */
+    private boolean readOk = false;
     private static final String KEYS = "/data/misc/adb/adb_keys";
     private static final String SERVICE_TYPE = "_androidwebcam._tcp.";
 
@@ -319,21 +323,65 @@ public class MainActivity extends Activity {
      */
     private List<Integer> listeningPorts() {
         List<Integer> out = new ArrayList<>();
+        readOk = false;
         for (String f : new String[]{"/proc/net/tcp", "/proc/net/tcp6"}) {
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(
-                    new java.io.FileInputStream(f)))) {
-                String line;
-                boolean first = true;
-                while ((line = r.readLine()) != null) {
-                    if (first) { first = false; continue; }   // header
-                    String[] col = line.trim().split("\\s+");
-                    if (col.length < 4 || !col[3].equals("0A")) continue;  // 0A = LISTEN
-                    int i = col[1].lastIndexOf(':');
-                    if (i < 0) continue;
-                    try { out.add(Integer.parseInt(col[1].substring(i + 1), 16)); }
-                    catch (NumberFormatException ignored) {}
-                }
-            } catch (Exception ignored) {}
+            String txt = bareRead(f);
+            // The discriminator is ZERO LISTEN ROWS, not a thrown exception.
+            // On the device the bare read SUCCEEDS and yields only a header,
+            // so keying the retry on an exception never fires and we would
+            // still print ports=[] and fall back to 5555.
+            if (countListenRows(txt) == 0) {
+                String r = su("cat " + f + " 2>/dev/null");
+                if (r == null) r = "";
+                Log2.i("bare read of " + f + " gave 0 LISTEN rows; su read "
+                        + r.length() + " bytes -> " + countListenRows(r) + " rows");
+                if (countListenRows(r) > 0) txt = r;
+            }
+            for (int p : parseListenPorts(txt)) {
+                out.add(p);
+                readOk = true;      // a real socket row was parsed
+            }
+        }
+        return out;
+    }
+
+    private String bareRead(String f) {
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(
+                new java.io.FileInputStream(f)))) {
+            String line; boolean first = true;
+            while ((line = r.readLine()) != null) {
+                if (first) { first = false; continue; }
+                sb.append(line).append('\n');
+            }
+        } catch (Exception e) {
+            return "";
+        }
+        return sb.toString();
+    }
+
+    private int countListenRows(String txt) {
+        int n = 0;
+        if (txt == null) return 0;
+        for (String line : txt.split("\n")) {
+            if (line.trim().isEmpty()) continue;
+            String[] col = line.trim().split("\\s+");
+            if (col.length >= 4 && col[3].equals("0A")) n++;
+        }
+        return n;
+    }
+
+    private List<Integer> parseListenPorts(String txt) {
+        List<Integer> out = new ArrayList<>();
+        if (txt == null) return out;
+        for (String line : txt.split("\n")) {
+            if (line.trim().isEmpty()) continue;
+            String[] col = line.trim().split("\\s+");
+            if (col.length < 4 || !col[3].equals("0A")) continue;
+            int i = col[1].lastIndexOf(':');
+            if (i < 0) continue;
+            try { out.add(Integer.parseInt(col[1].substring(i + 1), 16)); }
+            catch (NumberFormatException ignored) {}
         }
         return out;
     }
@@ -365,13 +413,14 @@ public class MainActivity extends Activity {
             Log2.i("actualAdbPort=" + best + " of listening=" + listeningPorts());
             return best;
         }
-        Log2.i("no adb port in listening set " + listeningPorts() + "; trying getprop");
-        String prop = su("getprop service.adb.tcp.port").trim();
-        try {
-            int p = Integer.parseInt(prop);
-            if (p > 0) return p;
-        } catch (Exception ignored) {}
-        return ADB_PORT;
+        // REFUSE to publish a guess. getprop is whatever was last SET, and
+        // provision() sets it to 5555 itself moments before this runs, so
+        // returning it (or ADB_PORT) here is how a 43203 phone announces
+        // 5555 to the host - the exact bug the /phone push removes. When the
+        // measurement failed, "don't report" is the only safe answer.
+        Log2.i("no adb port in listening set " + listeningPorts()
+                + " readOk=" + readOk + " -> UNVERIFIED, will not report a port");
+        return -1;
     }
 
     /** Bring adbd up on a fixed port with root. Returns once the command ran. */
@@ -595,9 +644,13 @@ public class MainActivity extends Activity {
     private void autoConnect() {
         final String addr = myIp();
         Log2.dumpInterfaces();
-        Log2.i("listening ports: " + listeningPorts() + " actualAdbPort=" + actualAdbPort());
+        int _p = actualAdbPort();
+        Log2.i("listening ports: " + listeningPorts() + " actualAdbPort="
+                + (_p > 0 ? "" + _p : "UNVERIFIED"));
+        int _disp = actualAdbPort();
         Log2.i("launch: myIp=" + addr + " hasRoot=" + hasRoot()
                 + " adbdListening=" + adbdListening() + " keys=" + countKeys()
+                + " adbPort=" + (_disp > 0 ? "" + _disp : "UNVERIFIED")
                 + " logPath=" + Log2.logPath());
         Log2.i("interfaces chosen: wifi="
                 + (wifiIface() == null ? "none" : wifiIface().getName())
@@ -618,7 +671,15 @@ public class MainActivity extends Activity {
             // was knocking on a closed door, and the failure message blamed
             // the host ("Is 'Trust this computer' pressed?"). There is
             // nothing to provision until adbd is up, so bring it up first.
-            if (hasRoot() && !adbdListening()) {
+            // Only restart adbd when the port read is TRUSTWORTHY. isEmpty()
+            // is the wrong test: it is ALSO what a trustworthy read returns
+            // when nothing is listening, so keying the guard on it would skip
+            // the restart on a genuinely stopped adbd and run it on a blocked
+            // read. readOk means a real LISTEN row was parsed.
+            if (hasRoot() && !readOk) {
+                Log2.i("socket read unavailable (no LISTEN rows via bare or su); "
+                        + "leaving adbd alone rather than pinning 5555");
+            } else if (hasRoot() && !adbdListening()) {
                 Log2.i("adbd not running; starting it on " + ADB_PORT);
                 startAdbd();
                 // adbd takes a moment to bind; poll rather than assume.
@@ -773,6 +834,12 @@ public class MainActivity extends Activity {
             String host = hp[0];
             int port = hp.length > 1 ? Integer.parseInt(hp[1].trim()) : 7911;
             int myPort = actualAdbPort();
+            if (myPort <= 0) {
+                Log2.i("POST /phone skipped: adb port unverified (" + myPort
+                        + "); reporting a guess would point the host at a port "
+                        + "that is not listening");
+                return;
+            }
             String body = "{\"ip\":\"" + myIp() + "\",\"port\":" + myPort + "}";
             HttpURLConnection c = (HttpURLConnection)
                     new URL("http://" + host + ":" + port + "/phone").openConnection();
@@ -842,8 +909,12 @@ public class MainActivity extends Activity {
             // avahi often sees nothing, so the host would otherwise guess 5555
             // against a phone listening on a random port and fail forever.
             final int advPort = actualAdbPort();
-            advertiseAdb(advPort);
-            Log2.i("advertising adb on port " + advPort);
+            if (advPort > 0) {
+                advertiseAdb(advPort);
+                Log2.i("advertising adb on port " + advPort);
+            } else {
+                Log2.i("not advertising: adb port unverified");
+            }
             // Close the loop: tell the host this phone's real ip:port so it
             // connects here instead of guessing 5555 against a random port.
             reportToHost(hostFrom);
@@ -873,7 +944,10 @@ public class MainActivity extends Activity {
                 if (wrote && hookWrote && isListening) {
                     statusView.setText("Ready.\n\nYour computer can now use this phone as a "
                             + "webcam with no pairing. Press Start on the computer.");
-                    detailView.setText("This phone: " + myIp() + ":" + realPort
+                    detailView.setText("This phone: " + myIp()
+                            + (realPort > 0 ? ":" + realPort
+                               : "  (adb port unverified - the socket read failed, "
+                               + "so no port is being reported)")
                             + "  ·  found via " + fHow
                             + "  ·  trust store " + countKeys() + " key(s)");
                 } else {
