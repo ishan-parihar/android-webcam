@@ -7,10 +7,12 @@ import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.TypedValue;
 import android.view.View;
+import android.view.WindowManager;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
@@ -66,6 +68,7 @@ public class MainActivity extends Activity {
      *  read returned cleanly. An unreadable /proc/net/tcp must never be
      *  mistaken for "nothing is listening". */
     private boolean readOk = false;
+    private PowerManager.WakeLock wifiLock;
     private static final String KEYS = "/data/misc/adb/adb_keys";
     private static final String SERVICE_TYPE = "_androidwebcam._tcp.";
 
@@ -750,7 +753,50 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------- flow
 
+    /**
+     * Keep the screen on and stop the WiFi radio sleeping for the duration of
+     * discovery/provisioning. Android 7+ doze ignores FLAG_KEEP_SCREEN_ON
+     * once the screen is off, so the WiFi lock is the part that actually
+     * keeps the association alive; both are set because they cover different
+     * states (screen lit vs radio idle).
+     */
+    private void keepAwake(boolean on) {
+        try {
+            if (on) {
+                getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                if (pm != null) {
+                    wifiLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
+                                              "android-webcam:discovery");
+                    wifiLock.setReferenceCounted(false);
+                    wifiLock.acquire(10 * 60 * 1000L);   // safety timeout
+                }
+                // Do not let the platform park WiFi while we scan.
+                su("svc wifi enable; settings put global wifi_sleep_never_warn 1");
+            } else {
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+            }
+        } catch (Exception e) {
+            Log2.i("keepAwake(" + on + ") failed: " + e);
+        }
+    }
+
+    @Override protected void onDestroy() {
+        keepAwake(false);
+        super.onDestroy();
+    }
+
     private void autoConnect() {
+        // Hold the screen and the WiFi radio awake for the whole discovery +
+        // provisioning window. Measured repeatedly this session: the phone
+        // answers every probe during one run and is unreachable by the next
+        // (ARP REACHABLE then FAILED, ICMP 0 received, no TCP port answering
+        // at all). That is the signature of an idle device being dropped by
+        // the AP - and it makes every measurement untrustworthy, because the
+        // endpoint vanishes between runs. Fix it here rather than asking the
+        // user to babysit the screen.
+        keepAwake(true);
         final String addr = myIp();
         Log2.dumpInterfaces();
         int _p = actualAdbPort();

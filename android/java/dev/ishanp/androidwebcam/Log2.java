@@ -21,7 +21,32 @@ final class Log2 {
 
     private Log2() {}
 
-    static void init(Context c) { appCtx = c.getApplicationContext(); }
+    static void init(Context c) {
+        appCtx = c.getApplicationContext();
+        // Each launch starts a FRESH log. Previously the file only rotated at
+        // 256KB, so a new run was appended straight after the previous one with
+        // no separator, and a pasted log mixed runs from different times into
+        // something that read as one coherent session. Two wrong conclusions
+        // in this session came from exactly that. Truncate here, once per
+        // launch, and mark the boundary so an old tail is never mistaken for
+        // the current run.
+        resetForNewRun();
+    }
+
+    /** Wipe the previous run and stamp a header for this one. */
+    private static synchronized void resetForNewRun() {
+        java.io.File f = logFile();
+        if (f == null) return;
+        try {
+            String head = "===== new run "
+                    + new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+                            .format(new java.util.Date()) + " =====\n";
+            java.nio.file.Files.write(f.toPath(),
+                    head.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            Log.w(TAG, "could not reset log: " + e);
+        }
+    }
 
     /**
      * getExternalFilesDir(null) is app-private and needs NO storage permission
