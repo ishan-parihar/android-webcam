@@ -406,33 +406,44 @@ public class MainActivity extends Activity {
      * /proc/net/tcp are the ground truth; getprop is only a fallback hint.
      */
     private int actualAdbPort() {
-        // Prefer a high port: on Android 13 wireless debugging adbd binds a
-        // RANDOM high port, and 5555 is frequently ALSO open (it is the
-        // wireless-debugging/MDM port). Picking 5555 when both are listening
-        // reports a port the host cannot connect to.
+        // Prefer the port WE pinned. The previous rule ("prefer the highest
+        // high port") was backwards and provably so: on this device the
+        // listening set was [35979, 5555, 1716, 50037, 5060] while
+        // getprop said service.adb.tcp.port=5555. 35979 is Android's own
+        // wireless-debugging adbd and it answers ConnectionRefused once that
+        // session ends, so the app announced a dead port and the host spent
+        // every run connecting to nothing.
+        //
+        // Truth is the PROPERTY, not the heuristic: ADB_PORT is what this app
+        // sets and persists, and adbd binds it. Only fall back to a discovered
+        // high port when the property is unset (never pinned), because then
+        // the high port is genuinely all we know.
+        String pinned = su("getprop service.adb.tcp.port").trim();
+        List<Integer> ports = listeningPorts();   // readOk set as a side effect
+        if (!pinned.isEmpty() && !pinned.equals("0")) {
+            int want = Integer.parseInt(pinned);
+            if (ports.contains(want)) {
+                Log2.i("actualAdbPort=" + want + " (pinned by getprop) of listening=" + ports);
+                return want;
+            }
+            // Pinned but not listening: adbd has not bound it yet, or something
+            // is wrong. Falling through to a guess is what got us here.
+            Log2.i("pinned port " + want + " NOT in listening set " + ports
+                    + " -> UNVERIFIED, will not report a port");
+            return -1;
+        }
         int best = -1;
-        // One read, captured. readOk is set as a side effect of
-        // listeningPorts(), so calling it again in a log line leaves the flag
-        // reflecting whichever call ran last; every check below must use the
-        // SAME snapshot as the loop.
-        List<Integer> ports = listeningPorts();
         for (int p : ports) {
-            // 5555 included (a real, common adbd port), plus the wireless
-            // debugging range. Logging the full list keeps a wrong pick
-            // visible in diagnostics instead of silently asserting it.
             if (p == ADB_PORT || (p >= 30000 && p <= 49999)) {
                 if (best < 0 || p > best) best = p;
             }
         }
         if (best > 0) {
-            Log2.i("actualAdbPort=" + best + " of listening=" + ports);
+            Log2.i("actualAdbPort=" + best + " (no pinned prop; guessing) of listening=" + ports);
             return best;
         }
-        // REFUSE to publish a guess. getprop is whatever was last SET, and
-        // provision() sets it to 5555 itself moments before this runs, so
-        // returning it (or ADB_PORT) here is how a 43203 phone announces
-        // 5555 to the host - the exact bug the /phone push removes. When the
-        // measurement failed, "don't report" is the only safe answer.
+        // REFUSE to publish a guess. When the measurement failed, "don't
+        // report" is the only safe answer - a wrong port is worse than none.
         Log2.i("no adb port in listening set " + ports
                 + " readOk=" + readOk + " -> UNVERIFIED, will not report a port");
         return -1;
@@ -869,6 +880,11 @@ public class MainActivity extends Activity {
                 if (keys > 0) {
                     ui.post(() -> done("Ready — your computer can use this phone as a "
                             + "webcam. " + keys + " trusted computer(s)."));
+                    // WAKE_LOCK is now granted, so this lock is really held
+                    // for 10 minutes unless released. This fast path runs on
+                    // EVERY app open once the phone is trusted - the common
+                    // case - and would leave the screen on that long.
+                    keepAwake(false);
                     return;
                 }
                 // Listening but EMPTY: the port belongs to the phone's own
@@ -880,6 +896,7 @@ public class MainActivity extends Activity {
             if (addr == null) {
                 ui.post(() -> statusView.setText(
                         "This phone is not on WiFi. Join the same WiFi as your computer, then reopen."));
+                keepAwake(false);   // nothing more to do; do not hold the screen
                 return;
             }
 
