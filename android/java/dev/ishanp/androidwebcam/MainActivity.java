@@ -541,10 +541,16 @@ public class MainActivity extends Activity {
                 return ok ? s : null;
             }
         } catch (Exception e) {
-            // The most likely cause: Network Security Config blocking cleartext,
-            // or the two machines not actually on the same subnet.
+            // A TIMEOUT here means the SYN was silently dropped, which is a
+            // firewall signature - nothing listening produces ConnectException
+            // ("refused"), not a timeout. The route the kernel picked and the
+            // ARP/neighbour entry say whether the packet even left the phone,
+            // which is the difference between a blocked packet and a wrong
+            // interface (the device also holds ccmni1 = 100.x, a CGNAT range).
             Log2.i("GET " + url + " -> FAILED " + e.getClass().getSimpleName()
                     + ": " + e.getMessage());
+            Log2.i("  route: " + su("ip route get " + host).trim().replace('\n', ' '));
+            Log2.i("  neigh: " + su("ip neigh show " + host).trim());
             return null;
         }
     }
