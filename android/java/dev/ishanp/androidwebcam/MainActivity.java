@@ -541,12 +541,15 @@ public class MainActivity extends Activity {
                 return ok ? s : null;
             }
         } catch (Exception e) {
-            // A TIMEOUT here means the SYN was silently dropped, which is a
-            // firewall signature - nothing listening produces ConnectException
-            // ("refused"), not a timeout. The route the kernel picked and the
-            // ARP/neighbour entry say whether the packet even left the phone,
-            // which is the difference between a blocked packet and a wrong
-            // interface (the device also holds ccmni1 = 100.x, a CGNAT range).
+            // A TIMEOUT means the SYN got NO answer. That is generic, and has
+            // TWO candidate causes: the packet left via the wrong interface
+            // (this device also holds ccmni1 = 100.88.225.39/8, a CGNAT range,
+            // which the kernel may prefer for a 192.168.1.x destination), or
+            // something dropped it. Nothing listening would instead be
+            // ConnectException ("refused"). mDNS resolving the host only proves
+            // multicast UDP reached the phone - it says nothing about a TCP
+            // reply coming back. The route line decides which of the two it is,
+            // and it is free; check it BEFORE going looking for a firewall.
             Log2.i("GET " + url + " -> FAILED " + e.getClass().getSimpleName()
                     + ": " + e.getMessage());
             Log2.i("  route: " + su("ip route get " + host).trim().replace('\n', ' '));
