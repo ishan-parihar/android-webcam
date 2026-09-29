@@ -1116,7 +1116,16 @@ public class MainActivity extends Activity {
             mgr.registerService(info, NsdManager.PROTOCOL_DNS_SD,
                     new NsdManager.RegistrationListener() {
                         @Override public void onServiceRegistered(NsdServiceInfo i) {
-                            Log2.i("registered " + ADB_SERVICE_TYPE + " on port " + i.getPort());
+                            // The registered instance does not always carry the
+                            // port back (observed: port 0 while the host
+                            // resolved the record as 192.168.1.4:5555), so log
+                            // what was requested too. A log that says "port 0"
+                            // sends the next reader hunting a bug that is not
+                            // there.
+                            Log2.i("registered " + ADB_SERVICE_TYPE
+                                    + " requested=" + port
+                                    + " reported=" + i.getPort()
+                                    + " name=" + i.getServiceName());
                         }
                         @Override public void onRegistrationFailed(NsdServiceInfo i, int c) {
                             Log2.i("adb advertisement failed code=" + c);
