@@ -771,11 +771,19 @@ public class MainActivity extends Activity {
                     wifiLock.setReferenceCounted(false);
                     wifiLock.acquire(10 * 60 * 1000L);   // safety timeout
                 }
-                // Do not let the platform park WiFi while we scan.
-                su("svc wifi enable; settings put global wifi_sleep_never_warn 1");
+                // The su setting is the part that survives an AP deauth: the
+                // screen flag only applies while this app is foreground, and
+                // the wake lock only keeps the CPU up. Log the return so a
+                // pasted log proves the setting actually applied.
+                String r = su("svc wifi enable; settings put global wifi_sleep_never_warn 1;"
+                            + " settings get global wifi_sleep_never_warn");
+                Log2.i("keepAwake on: lock=" + (wifiLock != null)
+                        + " wifi_sleep_never_warn=" + r.trim()
+                        + " (1 = wifi will not sleep mid-scan)");
             } else {
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+                Log2.i("keepAwake off: screen flag cleared, lock released");
             }
         } catch (Exception e) {
             Log2.i("keepAwake(" + on + ") failed: " + e);
@@ -915,6 +923,7 @@ public class MainActivity extends Activity {
                     spinner.bar.setVisibility(View.GONE);
                     manualBox.setVisibility(View.VISIBLE);
                 });
+                keepAwake(false);   // discovery done: stop holding the device
                 return;
             }
 
@@ -926,12 +935,18 @@ public class MainActivity extends Activity {
                             + " but it didn't hand over a key.");
                     spinner.bar.setVisibility(View.GONE);
                 });
+                keepAwake(false);   // discovery done: stop holding the device
                 return;
             }
 
             say("Found your computer at " + host + " (" + how + ")");
             Log2.i("provisioning with key from " + host);
             provision(key, how, host);
+            // Released AFTER provision(), not before: provisioning is what
+            // writes the trust store and restarts adbd, so releasing earlier
+            // would let the device sleep through the one step that must not
+            // be interrupted. onDestroy is the backstop.
+            keepAwake(false);   // discovery and provisioning both done
         });
     }
 
