@@ -321,6 +321,12 @@ public class MainActivity extends Activity {
      * port (observed 43203), so a check for 5555 could never pass and the app
      * reported "not listening" on a phone that was serving fine.
      */
+    /** A fresh read, so the caller's check is never based on a stale flag. */
+    private boolean freshReadOk() {
+        listeningPorts();
+        return readOk;
+    }
+
     private List<Integer> listeningPorts() {
         List<Integer> out = new ArrayList<>();
         readOk = false;
@@ -333,9 +339,10 @@ public class MainActivity extends Activity {
             if (countListenRows(txt) == 0) {
                 String r = su("cat " + f + " 2>/dev/null");
                 if (r == null) r = "";
+                int rows = countListenRows(r);
                 Log2.i("bare read of " + f + " gave 0 LISTEN rows; su read "
-                        + r.length() + " bytes -> " + countListenRows(r) + " rows");
-                if (countListenRows(r) > 0) txt = r;
+                        + r.length() + " bytes -> " + rows + " rows");
+                if (rows > 0) txt = r;
             }
             for (int p : parseListenPorts(txt)) {
                 out.add(p);
@@ -401,7 +408,12 @@ public class MainActivity extends Activity {
         // wireless-debugging/MDM port). Picking 5555 when both are listening
         // reports a port the host cannot connect to.
         int best = -1;
-        for (int p : listeningPorts()) {
+        // One read, captured. readOk is set as a side effect of
+        // listeningPorts(), so calling it again in a log line leaves the flag
+        // reflecting whichever call ran last; every check below must use the
+        // SAME snapshot as the loop.
+        List<Integer> ports = listeningPorts();
+        for (int p : ports) {
             // 5555 included (a real, common adbd port), plus the wireless
             // debugging range. Logging the full list keeps a wrong pick
             // visible in diagnostics instead of silently asserting it.
@@ -410,7 +422,7 @@ public class MainActivity extends Activity {
             }
         }
         if (best > 0) {
-            Log2.i("actualAdbPort=" + best + " of listening=" + listeningPorts());
+            Log2.i("actualAdbPort=" + best + " of listening=" + ports);
             return best;
         }
         // REFUSE to publish a guess. getprop is whatever was last SET, and
@@ -418,7 +430,7 @@ public class MainActivity extends Activity {
         // returning it (or ADB_PORT) here is how a 43203 phone announces
         // 5555 to the host - the exact bug the /phone push removes. When the
         // measurement failed, "don't report" is the only safe answer.
-        Log2.i("no adb port in listening set " + listeningPorts()
+        Log2.i("no adb port in listening set " + ports
                 + " readOk=" + readOk + " -> UNVERIFIED, will not report a port");
         return -1;
     }
@@ -593,8 +605,28 @@ public class MainActivity extends Activity {
      * Returns "ip:port" or null. Logging here is what makes a failed run
      * diagnosable instead of a guess.
      */
-    private String sweepForHost(String addr) {
-        ExecutorService pool = Executors.newFixedThreadPool(64);
+    private String sweepForHost(String addr, String host) {
+            // Probe the KNOWN host directly and report WHY it failed. A closed
+            // port (ECONNREFUSED) and a firewall DROP (timeout) are
+            // indistinguishable in the `live` list below, and that is the
+            // actual open question: if this direct probe succeeds, the 253-way
+            // sweep is what is broken, not reachability.
+            try (Socket s = new Socket()) {
+                s.connect(new InetSocketAddress(host, 7911), 3000);
+                Log2.i("direct probe " + host + ":7911 CONNECTED");
+            } catch (java.net.SocketTimeoutException e) {
+                Log2.i("direct probe " + host + ":7911 TIMEOUT - packets dropped "
+                        + "(firewall?) or wrong interface; route: "
+                        + su("ip route get " + host).trim().replace('\n', ' '));
+            } catch (java.net.ConnectException e) {
+                Log2.i("direct probe " + host + ":7911 REFUSED - reachable, but "
+                        + "nothing is listening; route: "
+                        + su("ip route get " + host).trim().replace('\n', ' '));
+            } catch (Exception e) {
+                Log2.i("direct probe " + host + ":7911 failed: " + e
+                        + "; route: " + su("ip route get " + host).trim().replace('\n', ' '));
+            }
+            ExecutorService pool = Executors.newFixedThreadPool(64);
         try {
             List<String> cands = scanSubnet(addr);
             List<Future<Boolean>> fs = new ArrayList<>();
@@ -645,18 +677,19 @@ public class MainActivity extends Activity {
         final String addr = myIp();
         Log2.dumpInterfaces();
         int _p = actualAdbPort();
-        Log2.i("listening ports: " + listeningPorts() + " actualAdbPort="
-                + (_p > 0 ? "" + _p : "UNVERIFIED"));
-        int _disp = actualAdbPort();
+        Log2.i("listening ports: " + listeningPorts() + " readOk=" + readOk
+                + " actualAdbPort=" + (_p > 0 ? "" + _p : "UNVERIFIED"));
         Log2.i("launch: myIp=" + addr + " hasRoot=" + hasRoot()
                 + " adbdListening=" + adbdListening() + " keys=" + countKeys()
-                + " adbPort=" + (_disp > 0 ? "" + _disp : "UNVERIFIED")
+                + " adbPort=" + (_p > 0 ? "" + _p : "UNVERIFIED")
                 + " logPath=" + Log2.logPath());
         Log2.i("interfaces chosen: wifi="
                 + (wifiIface() == null ? "none" : wifiIface().getName())
                 + " realPrefix=/" + prefixLength());
+        final int launchPort = actualAdbPort();
         ui.post(() -> addrView.setText("This phone: "
-                + (addr == null ? "no WiFi address" : addr + ":" + actualAdbPort())));
+                + (addr == null ? "no WiFi address"
+                   : addr + (launchPort > 0 ? ":" + launchPort : ":port unknown"))));
 
         bg.execute(() -> {
             // Fast path: already provisioned on a PREVIOUS run. It must check
@@ -676,7 +709,7 @@ public class MainActivity extends Activity {
             // when nothing is listening, so keying the guard on it would skip
             // the restart on a genuinely stopped adbd and run it on a blocked
             // read. readOk means a real LISTEN row was parsed.
-            if (hasRoot() && !readOk) {
+            if (hasRoot() && !freshReadOk()) {
                 Log2.i("socket read unavailable (no LISTEN rows via bare or su); "
                         + "leaving adbd alone rather than pinning 5555");
             } else if (hasRoot() && !adbdListening()) {
@@ -717,12 +750,17 @@ public class MainActivity extends Activity {
         // instant and unambiguous, but a host may not publish a resolvable
         // mDNS record at all, so it must never be the only way in.
         String host = discoverViaNsd();
+        // Default to the subnet's gateway (usually the host PC). Probing it
+        // DIRECTLY distinguishes a firewall drop from a wrong interface,
+        // which the 253-way sweep cannot: a refused connect and a dropped
+        // packet both just produce an empty `live` list.
+        final String hostIp = (host == null) ? "192.168.1.1" : host;
         String how = "automatic discovery (mDNS)";
         Log2.i("nsd -> " + (host == null ? "nothing" : host));
 
             if (host == null) {
                 say("Scanning this network for your computer…");
-                host = sweepForHost(addr);
+                host = sweepForHost(addr, hostIp);
                 how = "network scan";
             }
 
@@ -737,7 +775,7 @@ public class MainActivity extends Activity {
                     try { Thread.sleep(7000); } catch (InterruptedException ignored) {
                         Thread.currentThread().interrupt();
                     }
-                    host = sweepForHost(addr);
+                    host = sweepForHost(addr, hostIp);
                     if (host != null) how = "network scan (retry " + attempt + ")";
                 }
             }
