@@ -605,37 +605,47 @@ public class MainActivity extends Activity {
      * Returns "ip:port" or null. Logging here is what makes a failed run
      * diagnosable instead of a guess.
      */
-    private String sweepForHost(String addr, String host) {
-            // Probe the KNOWN host directly and report WHY it failed. A closed
-            // port (ECONNREFUSED) and a firewall DROP (timeout) are
-            // indistinguishable in the `live` list below, and that is the
-            // actual open question: if this direct probe succeeds, the 253-way
-            // sweep is what is broken, not reachability.
+    private String sweepForHost(String addr, String gateway) {
+            // Probe the SUBNET GATEWAY, derived from the phone's own address
+            // rather than hardcoded, so this works on any network. This does
+            // not probe the host PC - on a typical router the host is not .1 -
+            // it answers one question only: can the phone's TCP stack reach
+            // the LAN at all? The per-exception tally below is the measurement
+            // that covers the real host.
             try (Socket s = new Socket()) {
-                s.connect(new InetSocketAddress(host, 7911), 3000);
-                Log2.i("direct probe " + host + ":7911 CONNECTED");
+                s.connect(new InetSocketAddress(gateway, 7911), 3000);
+                Log2.i("gateway probe " + gateway + ":7911 CONNECTED");
             } catch (java.net.SocketTimeoutException e) {
-                Log2.i("direct probe " + host + ":7911 TIMEOUT - packets dropped "
-                        + "(firewall?) or wrong interface; route: "
-                        + su("ip route get " + host).trim().replace('\n', ' '));
+                Log2.i("gateway probe " + gateway + ":7911 TIMEOUT - packets dropped; route: "
+                        + su("ip route get " + gateway).trim().replace('\n', ' '));
             } catch (java.net.ConnectException e) {
-                Log2.i("direct probe " + host + ":7911 REFUSED - reachable, but "
-                        + "nothing is listening; route: "
-                        + su("ip route get " + host).trim().replace('\n', ' '));
+                Log2.i("gateway probe " + gateway + ":7911 REFUSED - LAN reachable, "
+                        + "nothing on 7911; route: "
+                        + su("ip route get " + gateway).trim().replace('\n', ' '));
             } catch (Exception e) {
-                Log2.i("direct probe " + host + ":7911 failed: " + e
-                        + "; route: " + su("ip route get " + host).trim().replace('\n', ' '));
+                Log2.i("gateway probe " + gateway + ":7911 failed: " + e
+                        + "; route: " + su("ip route get " + gateway).trim().replace('\n', ' '));
             }
             ExecutorService pool = Executors.newFixedThreadPool(64);
         try {
             List<String> cands = scanSubnet(addr);
+            // Tally WHY each candidate failed. An empty `live` list cannot tell
+            // a host-listener problem from a routing problem; the distribution
+            // can: 253 x ConnectException means the LAN answers, 253 x
+            // NoRouteToHostException confirms the wrong interface.
+            final java.util.Map<String,Integer> why =
+                    new java.util.concurrent.ConcurrentHashMap<>();
             List<Future<Boolean>> fs = new ArrayList<>();
             for (final String c : cands) {
                 fs.add(pool.submit(() -> {
                     try (Socket s = new Socket()) {
                         s.connect(new InetSocketAddress(c, 7911), 800);
                         return true;
-                    } catch (Exception e) { return false; }
+                    } catch (Exception e) {
+                        String k = e.getClass().getSimpleName();
+                        why.merge(k, 1, Integer::sum);
+                        return false;
+                    }
                 }));
             }
             List<String> live = new ArrayList<>();
@@ -643,6 +653,7 @@ public class MainActivity extends Activity {
                 try { if (fs.get(i).get()) live.add(cands.get(i)); } catch (Exception ignored) {}
             }
             Log2.i("scan: tried " + cands.size() + " addrs, live on 7911 = " + live);
+            Log2.i("scan: failure reasons " + cands.size() + " candidates -> " + why);
             // Put the outcome ON SCREEN. "Looking again" with no visible reason
             // is the failure mode this whole change exists to eliminate.
             final int tried = cands.size();
@@ -750,11 +761,13 @@ public class MainActivity extends Activity {
         // instant and unambiguous, but a host may not publish a resolvable
         // mDNS record at all, so it must never be the only way in.
         String host = discoverViaNsd();
-        // Default to the subnet's gateway (usually the host PC). Probing it
-        // DIRECTLY distinguishes a firewall drop from a wrong interface,
-        // which the 253-way sweep cannot: a refused connect and a dropped
-        // packet both just produce an empty `live` list.
-        final String hostIp = (host == null) ? "192.168.1.1" : host;
+        // The gateway, derived from the phone's OWN address so this works on
+        // any subnet instead of baking in one network. Used only to answer
+        // "can the phone reach the LAN at all" - the host PC is not necessarily
+        // the gateway, so this is not a probe of the host.
+        final String hostIp = (host != null) ? host
+                : (addr != null && addr.contains(".")
+                   ? addr.substring(0, addr.lastIndexOf('.')) + ".1" : null);
         String how = "automatic discovery (mDNS)";
         Log2.i("nsd -> " + (host == null ? "nothing" : host));
 
