@@ -126,19 +126,31 @@ with tmpcfg():
           "a failed `set` still wrote to disk")
 
     # --- the key is validated BEFORE coercion -----------------------------
-    # Coercion keys off DEFAULTS.get(key), which is None for an unknown key, so
-    # the old order let `set torcht on` fall through to the else branch and hand
-    # update() the string "on" - failing only afterwards, without naming the key.
-    try:
-        rc_typo = set_cmd(["torcht", "on"])
-        raised = None
-    except Exception as e:      # update() raised rather than set_cmd returning 2
-        rc_typo, raised = None, e
-    check("a typo'd key is refused with a non-zero exit, not a late KeyError",
-          rc_typo == 2,
-          f"returned {rc_typo}, raised {raised!r} - the error could not name the key")
+    # What the reordering actually changes is the MESSAGE, not the exit code.
+    # Both paths exit 2: the old one because coercion handed the string "on" to
+    # update(), which raised KeyError, caught at the end of set_cmd. So asserting
+    # the exit code alone pins nothing about the order - and it stayed green when
+    # the validation was moved back. The observable difference is WHERE the key
+    # is named: set_cmd's own check lists the known settings, update()'s late
+    # raise does not. Assert the message.
+    import io
+    import contextlib
+
+    def _set_capture(argv):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = set_cmd(argv)
+        return rc, err.getvalue()
+
+    before_typo = cfgmod.CONFIG_FILE.read_text()
+    rc_typo, msg_typo = _set_capture(["torcht", "on"])
+    check("a typo'd key exits non-zero", rc_typo == 2, f"returned {rc_typo}")
+    check("the typo'd key is named by set_cmd's own check, not by a late raise",
+          "torcht" in msg_typo and "known settings" in msg_typo.lower(),
+          f"message was {msg_typo.strip()[:80]!r} - it fell through to "
+          f"update()'s KeyError, so the reordering is not exercised")
     check("a typo'd key never reaches the file",
-          "torcht" not in cfgmod.CONFIG_FILE.read_text(),
+          cfgmod.CONFIG_FILE.read_text() == before_typo,
           "the mistyped key was written to disk")
 
     # --- private state is not a setting anyone can set ---------------------

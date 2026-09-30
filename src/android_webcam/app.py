@@ -928,15 +928,17 @@ def set_cmd(argv):
 
     while i < len(args):
         key = args[i].lstrip("-").replace("-", "_")
+        # Arity first, so `set torcht` (no value) is reported as a missing value
+        # rather than dumping the whole known-settings list first.
+        if i + 1 >= len(args):
+            print(f"set: {key} needs a value", file=sys.stderr)
+            return 2
         # Validate BEFORE coercing. Coercion keys off DEFAULTS.get(key), which
         # returns None for an unknown key, so `set torcht on` used to fall
         # through to the else branch and be handed to update() as the string
         # "on" - only for update() to raise, and by then the error could not say
-        # which key was wrong.
+        # which key was wrong or list the settings that do exist.
         if _reject(key):
-            return 2
-        if i + 1 >= len(args):
-            print(f"set: {key} needs a value", file=sys.stderr)
             return 2
         raw = args[i + 1]
         default = DEFAULTS.get(key)
