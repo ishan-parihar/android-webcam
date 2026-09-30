@@ -173,6 +173,21 @@ with tmpcfg():
           set_cmd(["torch", "on"]) == 0 and cfgmod.load()["torch"] is True,
           "the reordering broke the normal path")
 
+    # --- arity is reported before the key is validated --------------------
+    # Both checks used to run in the other order, so `set torcht` with no value
+    # dumped the entire known-settings list before saying what was actually
+    # wrong. A typo that also omits its value should name that mistake.
+    before_arity = cfgmod.CONFIG_FILE.read_text()
+    rc_arity, msg_arity = _set_capture(["torcht"])
+    check("a missing value is reported as a missing value",
+          rc_arity == 2 and "needs a value" in msg_arity,
+          f"rc={rc_arity}, message {msg_arity.strip()[:70]!r}")
+    check("the arity error does not dump the settings list first",
+          "known settings" not in msg_arity.lower(),
+          f"message {msg_arity.strip()[:70]!r}")
+    check("the arity error left the file untouched",
+          cfgmod.CONFIG_FILE.read_text() == before_arity, "")
+
     # --- a real value, not a mock echo: the config the backend reads
     set_cmd(["camera_facing", "back", "resolution", "1080p"])
     final = json.loads(cfgmod.CONFIG_FILE.read_text())
