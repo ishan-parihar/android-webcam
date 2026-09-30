@@ -12,10 +12,26 @@ This mirrors the phone's own gate - trustFileHasHostKey() does an exact
 stub hides length sensitivity: an early run of this test with a 40-char stub
 FAILED its own positive control.
 """
+import base64
 import pathlib
 import sys
 
-OUR = pathlib.Path.home().joinpath(".android/adbkey.pub").read_text().split()[0]
+
+def _load_host_key() -> str:
+    """Our host key, or a synthetic stand-in if this machine has none.
+
+    Reading it at module level raises FileNotFoundError during collection on
+    any clone without an adb key - the portability bug already fixed in the
+    sibling test. A ~700-char base64 blob stands in: length is what the
+    stub-vs-real failure was about, and no assertion depends on the bytes.
+    """
+    pub = pathlib.Path.home() / ".android" / "adbkey.pub"
+    if pub.exists():
+        return pub.read_text().split()[0]
+    return base64.b64encode(b"0" * 520).decode()
+
+
+OUR = _load_host_key()
 OTHER = "AAAAC3NzaC1lZDI1NTE5AAAAIGotherHostKey000000000000000000"
 
 

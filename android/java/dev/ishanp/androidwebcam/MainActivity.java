@@ -1168,8 +1168,17 @@ public class MainActivity extends Activity {
      */
     private boolean trustFileHasHostKey() {
         String pub = hostPublicKey();
-        if (pub == null || pub.isEmpty()) return false;
+        if (pub == null || pub.isEmpty()) {
+            Log2.i("gate: no cached host key (never provisioned, or cache lost)");
+            return false;
+        }
+        // Log what we are comparing AND what the file actually holds, so a false
+        // negative is diagnosable from the log instead of needing root on the
+        // host - adb_keys is root-only and reads as an empty string from a shell.
+        String file = su("cat " + KEYS + " 2>/dev/null");
         String s = su("grep -qxF '" + pub + "' " + KEYS + " 2>/dev/null && echo YES || echo NO");
+        Log2.i("gate: cachedKey=" + pub.length() + "ch fileBytes=" + (file == null ? -1 : file.trim().length())
+                + "ch cachedHasSpace=" + pub.contains(" ") + " -> " + (s == null ? "null" : s.trim()));
         return s != null && s.trim().endsWith("YES");
     }
 
@@ -1182,15 +1191,29 @@ public class MainActivity extends Activity {
         if (hostPubKey == null) {
             hostPubKey = getSharedPreferences("webcam", MODE_PRIVATE)
                     .getString("host_pubkey", "");
+            // First field only, defensively. The WRITE path already strips the
+            // comment (see provision()), so a value cached by any current build
+            // is bare already; this only normalises a value cached by an older
+            // one. NOTE: this is NOT the cause of 13:49's present=false - I
+            // claimed that, then found the write path strips at :1287. The real
+            // cause is still unknown; the gate's own logging below is what will
+            // show it.
+            int sp = hostPubKey.indexOf(' ');
+            if (sp > 0) hostPubKey = hostPubKey.substring(0, sp);
         }
         return hostPubKey.isEmpty() ? null : hostPubKey;
     }
 
     /** Remember the host key so the fast path can recognise it on later launches. */
     private void rememberHostKey(String pub) {
-        hostPubKey = pub;
+        // Store the FIRST FIELD only, so the cached value is directly
+        // comparable to a line in adb_keys. Idempotent.
+        String key = pub == null ? "" : pub.trim().split("\\s+")[0];
+        Log2.i("rememberHostKey: " + key.length() + " chars"
+                + ", hadComment=" + (pub != null && pub.contains(" ")));
+        hostPubKey = key;
         getSharedPreferences("webcam", MODE_PRIVATE)
-                .edit().putString("host_pubkey", pub).apply();
+                .edit().putString("host_pubkey", key).apply();
     }
 
     private void say(String msg) {

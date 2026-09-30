@@ -135,7 +135,7 @@ below, which is the most important thing in this section.
 | the phone mic is opened exactly once | **was BROKEN, fixed in `3c5b2a1`** — webcam-then-mic-only put 2 scrcpy streams in `scrcpy_mic`, and the system mic carried the phone mic summed with itself (mean −70.0 dB one session, −54.7 dB two, +15.3 dB). The camera and microphone are one capture resource. Now 1 stream in both click orders, and the mic button is disabled while the webcam runs. | `pactl list sink-inputs` counts the scrcpy sink-inputs, and the level is compared across session counts — a dB reading alone cannot see a doubled source |
 | `mic_to_phone` sends host audio to the phone | **RETRACTED — does not exist** | `scrcpy --help`: `--audio-dup` is "capture and keep playing on the device" and is only valid with `--audio-source=playback`. scrcpy has no host→phone audio path. |
 | phone playback capture carries signal | **UNEXERCISED** — the path starts and registers a source, but no audio was playing on the phone during the test, so the −91.0 dB reading is a NULL result, not a pass or a fail | needs audio playing on the phone |
-| zero-key bootstrap (empty trust store) | **UNPROVEN — and the earlier claim of proof was wrong** | see below |
+| zero-key bootstrap (no key of ours in the store) | **PROVEN 13:43** — `wrote=true hook=true listening=true`; host logged `served key to 192.168.1.4`; `adb devices` went `unauthorized` -> `device`; `adb shell` ran | the store held 1 key, a FOREIGN one, so this is exactly the state that used to fake success. positive: our key is in `settings get secure authorized_adb_keys` (readable from the host) and adbd answers `device`, which it only does for a key in the FILE. negative: 13:15, old APK, same foreign key -> `1/1 present` -> straight to `advertising adb`, ZERO server requests. The 13:15/13:21 pair isolates the trust gate; 13:21/13:43 isolates the ufw rule |
 | mic level is usable for speech | **sink-volume fix proven; speech usability NOT ESTABLISHED** — `ensure_null_sink` now forces 100%, and the attenuation it caused is measured: same capture chain, one session, sink as created mean −75.1 dB vs forced to 100% mean −36.1 dB, against a −91.0 dB floor. With the fix in place and no manual intervention the shipped default reads **mean −52.9 dB**. That is the whole evidence. | the floor is `max == mean == −91.0 dB` with scrcpy killed; a fresh sink and a pre-existing 20% sink were both checked to come up at `vol 1.00`. What is NOT shown: anyone speaking. One quiet-room sample cannot separate speech from ambient, so no speech-level claim is made. |
 
 ### Trust store: PROVEN at 13:43, and how it was nearly missed
@@ -190,11 +190,18 @@ untouched` and returns - so the app CANNOT repopulate an empty store, and it
 is not what re-added the paired entry. The `keys=N` on the launch line is a
 count read from (1).
 
-The empty file is written by `provision()` in the app, confirmed at 13:43 by
-`wrote=true` and by adb going to `device`. The file cannot be verified from the
-host: `su` is KernelSU-scoped to the app, so `su -c grep ... /data/misc/adb`
-returns `su: inaccessible or not found`. The phone's own log line is the
-authority.
+The store is written by `provision()` in the app, confirmed at 13:43 by
+`wrote=true` and by adb going to `device`. Note the store was never EMPTY: it
+held 1 key belonging to another host, and that foreign key WAS the bug - it
+made `keys > 0` true and the app skipped discovery entirely.
+
+The file's contents cannot be read from the host at all: `cat`, `wc -l` and
+`wc -c` on /data/misc/adb/adb_keys all return `Permission denied`, and an
+earlier `wc -l` that appeared to print `1` was that error text on stderr, not a
+count. I briefly read it as "1 line present" and drew a verdict from it. The
+readable surface is `settings get secure authorized_adb_keys`, which the app
+populates but which is a different store; the phone's own log is the authority
+on the file.
 
 SEVEN TRAPS THAT PRODUCED WRONG CONCLUSIONS HERE, all mine:
 
@@ -219,6 +226,16 @@ SEVEN TRAPS THAT PRODUCED WRONG CONCLUSIONS HERE, all mine:
      backend.py on import, taking the whole host app down. scripts/
      check-python.sh now gates every commit, and is verified BY FAILURE:
      re-injecting that exact break exits 1 and names the file.
+  8. Reading `cat /data/misc/adb/adb_keys` as empty and then concluding
+     "whole line DIFFERS (this is the bug)". Both verdicts compared our key
+     against the empty string - the read never ran. Same shape as trap 3.
+  9. Claiming a comment-field mismatch caused 13:49's `present=false`. The
+     write path already strips the comment at :1287, so the cached key was
+     already bare. Refuted by reading the code; the comment in
+     hostPublicKey() now says so rather than repeating it.
+  10. 13:49's firewall control is the LIVE one: `control probe 192.168.1.13:22
+     (sshd, OPEN on this host) -> 0`, versus `-2` at 13:21. Same probe, same
+     host, only the ufw rule changed.
 
 ### On controls
 
