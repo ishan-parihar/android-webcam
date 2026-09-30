@@ -124,9 +124,9 @@ below, which is the most important thing in this section.
 | Claim | Result | Control that makes it falsifiable |
 |---|---|---|
 | APK builds and installs | **proven** — `android/build.sh` uses bare `javac` and exits 0; the APK was installed from `~/Downloads/android-webcam.apk` and produced this session's device log | build exits non-zero on any syntax error; the device log proves the installed APK ran |
-| app provisions the trust store without a prompt | **proven on an EMPTY trust store** — after revoking the paired PC, the phone reported `keys=0`, swept the /24 four times and logged `FAILED: no host found via nsd or 4 sweeps` because the host was not listening. With `serve_key` running on 7911 the host served the key over HTTP 200 and adb went `unauthorized` → `device` with no pairing dialog; `adb shell id` then returned `uid=2000(shell)`. | the trust store was genuinely empty (`keys=0`) and the pairing prompt was the only alternative, so there is nothing else that could have authorized it |
+| app provisions the trust store without a prompt | **authorization observed, mechanism UNPROVEN** — see the note under the table. The writer has never been seen to run. | none yet: the fetch must appear in the phone log with a non-zero `keys=` on a later launch |
 | `adb_keys` is never truncated | **unverified this session** — the code is append-only with a `grep -qxF` guard and backs up first, but no re-run was done here | `adb_keys.bak` exists; a second run must be a no-op |
-| host key handover needs only one click | **proven** — the phone finds the host by sweeping for port 7911 and the host answers `GET /adbkey.pub` (HTTP 200, 715 bytes). mDNS publication is best-effort: `avahi-publish` yields no resolvable record on this network, so the sweep is the real mechanism. | `curl http://<host>:7911/adbkey.pub` returns the key while the server is up; the phone's log names the exact port when the sweep fails |
+| host key handover needs only one click | **half-proven** — `serve_key` really does bind 192.168.1.13:7911 and answers `GET /adbkey.pub` with HTTP 200 and 715 bytes of key. But the one consumer observed was a local `curl`, not the phone. | `curl http://<host>:7911/adbkey.pub` returns the key while the server is up; the phone's log names port 7911 when the sweep fails |
 | real adb port is learned | **proven on device** — the phone log reports `actualAdbPort=5555 (pinned by getprop) of listening=[5555, 1716, 39829, 50037, 5060]`, i.e. the pinned port was confirmed present in the LISTEN set, and the host connected to 5555 | `actualAdbPort()` returns −1 when the pinned port is absent from the LISTEN set |
 | webcam delivers live video | **proven** — 3 grabs 3s apart, 3 distinct md5s (337269/334586/347891 B) | after killing scrcpy the grab is 0 B; a retained still would still hash |
 | phone mic reaches applications | **proven as delivery** — recording the literal `default` node: live mean −79.9 dB, dead mean −91.0 dB with `max == mean` (+12.2 dB) | dead run is true digital silence; a check that cannot read −91.0 measures nothing |
@@ -135,8 +135,38 @@ below, which is the most important thing in this section.
 | the phone mic is opened exactly once | **was BROKEN, fixed in `3c5b2a1`** — webcam-then-mic-only put 2 scrcpy streams in `scrcpy_mic`, and the system mic carried the phone mic summed with itself (mean −70.0 dB one session, −54.7 dB two, +15.3 dB). The camera and microphone are one capture resource. Now 1 stream in both click orders, and the mic button is disabled while the webcam runs. | `pactl list sink-inputs` counts the scrcpy sink-inputs, and the level is compared across session counts — a dB reading alone cannot see a doubled source |
 | `mic_to_phone` sends host audio to the phone | **RETRACTED — does not exist** | `scrcpy --help`: `--audio-dup` is "capture and keep playing on the device" and is only valid with `--audio-source=playback`. scrcpy has no host→phone audio path. |
 | phone playback capture carries signal | **UNEXERCISED** — the path starts and registers a source, but no audio was playing on the phone during the test, so the −91.0 dB reading is a NULL result, not a pass or a fail | needs audio playing on the phone |
-| zero-key bootstrap (empty trust store) | **proven** — see the trust-store row above. Revoking the paired PC gives `keys=0`; the app then sweeps for port 7911, the host's `serve_key` answers, and adb authorizes with no prompt. The user's own loop (install APK → host finds phone) is now exercised rather than assumed. | the store was empty, so the fast path could not have run |
-| mic level is usable for speech | **proven after a fix** — the null sink inherited a low default volume and attenuated the mic by ~39 dB (mean −75.1 dB). `ensure_null_sink` now forces 100%; re-measured with no manual intervention: **mean −52.9 dB, max −27.7 dB** against the −91.0 dB floor. Echo is unaffected: the null sink discards playback, and `mic_mute` handles muting separately. | the same capture chain with scrcpy killed reads `max == mean == −91.0 dB`; a fresh sink and a pre-existing 20% sink were both checked to come up at `vol 1.00` |
+| zero-key bootstrap (empty trust store) | **UNPROVEN — and the earlier claim of proof was wrong** | see below |
+| mic level is usable for speech | **sink-volume fix proven; speech usability NOT ESTABLISHED** — `ensure_null_sink` now forces 100%, and the attenuation it caused is measured: same capture chain, one session, sink as created mean −75.1 dB vs forced to 100% mean −36.1 dB, against a −91.0 dB floor. With the fix in place and no manual intervention the shipped default reads **mean −52.9 dB**. That is the whole evidence. | the floor is `max == mean == −91.0 dB` with scrcpy killed; a fresh sink and a pre-existing 20% sink were both checked to come up at `vol 1.00`. What is NOT shown: anyone speaking. One quiet-room sample cannot separate speech from ambient, so no speech-level claim is made. |
+
+### The trust-store writer is NOT proven, and one commit claimed it was
+
+Commit `72d40b3` said "Record the zero-key bootstrap as proven". That was
+wrong, and the error is worth preserving because it is the exact shape this
+project keeps falling into.
+
+What the evidence actually was:
+  - revoking the paired PC gave the phone `keys=0` and its last log line is
+    `11:30:42  FAILED: no host found via nsd or 4 sweeps`;
+  - the phone app never ran again (log mtime 11:30:42, unchanged afterwards),
+    so **no launch ever observed a non-zero key count**;
+  - `serve_key`'s own output reads `served key to 192.168.1.13` — that is the
+    HOST's address, and it was my own `curl` that consumed the one-shot server;
+  - adb did go `unauthorized` → `device`, and `adb shell id` worked, but nothing
+    observed ties that to this app: the phone's own log never shows a fetch,
+    and authorization is exactly what a pairing dialog or a restored key would
+    also produce.
+
+So the honest status is **authorization observed, mechanism unproven**. What is
+solid: the empty-store diagnostic works and names the real cause
+(`nothing listening on 7911 - check the host app has 'Let phone in' pressed`),
+the subnet sweep runs, and `serve_key` binds the LAN address and serves a key.
+
+To close it, a phone launch must log a non-zero `keys=` AFTER a fetch. One run:
+  1. revoke the paired PC again,
+  2. press "Let phone in" on the host and do NOT curl it,
+  3. open the phone app, let the sweep find 7911,
+  4. confirm the phone log shows the host address served and a later launch
+     reporting `keys=1` with `manager key: 1/1 host key(s) present`.
 
 ### On controls
 
