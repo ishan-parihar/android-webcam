@@ -16,16 +16,31 @@ def ensure_null_sink() -> bool:
     as a playback stream, causing echo.  Routing it to a null sink and
     exposing the null sink's monitor as a source gives us a real mic
     without speakers.  Returns True if sink is ready.
+
+    The sink is forced to 100% volume. A null sink inherits a low default on
+    this machine and that attenuates the phone mic by roughly 39 dB, which
+    makes the mic deliver audio that is far too quiet to use in a call.
+    Measured through the identical capture chain in one live session:
+        sink volume as created : mean -75.1 dB   max -59.9 dB
+        sink volume forced 100%: mean -36.1 dB   max -12.7 dB
+    Echo is unaffected because the sink discards everything; muting is handled
+    separately by mic_mute.
     """
     try:
         r = subprocess.run(["pactl","list","short","sinks"], capture_output=True, text=True, timeout=3)
-        if NULL_SINK in r.stdout:
-            return True
-        r = subprocess.run(["pactl","load-module","module-null-sink",
-                            f"sink_name={NULL_SINK}",
-                            "sink_properties=device.description='PhoneMic_scrcpy'"],
-                           capture_output=True, text=True, timeout=5)
-        return r.returncode == 0 or NULL_SINK in r.stdout
+        if NULL_SINK not in r.stdout:
+            r = subprocess.run(["pactl","load-module","module-null-sink",
+                                f"sink_name={NULL_SINK}",
+                                "sink_properties=device.description='PhoneMic_scrcpy'"],
+                               capture_output=True, text=True, timeout=5)
+            created = r.returncode == 0
+        else:
+            created = False
+        # Unconditionally, so an existing sink left at a low volume by an
+        # earlier session is corrected too.
+        subprocess.run(["pactl","set-sink-volume", NULL_SINK, "100%"],
+                       capture_output=True, timeout=3)
+        return created or NULL_SINK in r.stdout
     except Exception:
         return False
 
