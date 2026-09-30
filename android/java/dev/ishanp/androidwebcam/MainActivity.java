@@ -1308,9 +1308,16 @@ public class MainActivity extends Activity {
             cmd.append("[ -f ").append(KEYS).append(" ] || : > ").append(KEYS).append("; ");
             // IDEMPOTENCY: append ONLY when absent. An unconditional append adds
             // a duplicate line on every run and grows adb_keys without bound.
-            cmd.append("awk '{print $1}' ").append(KEYS)
-               .append(" | grep -qxF '").append(k).append("' ")
-               .append(" 2>/dev/null || printf '%s\\n' '").append(k).append("' >> ")
+            // The braces matter: `|` binds tighter than `||`, so the unbraced
+            // form parses as `awk KEYS | (grep || printf)` and the printf runs
+            // inside the pipeline, not as the guard's alternative. Measured
+            // (tests/test_append_guard_precedence.py): both forms append once
+            // on a miss and never on a hit, so this is a parse-clarity fix
+            // rather than a behaviour change - but the comment above claims a
+            // guard, and this is the guard the comment describes.
+            cmd.append("{ awk '{print $1}' ").append(KEYS)
+               .append(" | grep -qxF '").append(k).append("' 2>/dev/null; } || ")
+               .append("printf '%s\\n' '").append(k).append("' >> ")
                .append(KEYS).append("; ");
             // adbd silently ignores a mislabelled/wrongly-owned trust store, which
             // looks identical to "pairing still broken".

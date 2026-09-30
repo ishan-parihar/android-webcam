@@ -75,6 +75,35 @@ def test_substring_rejected():
     assert exact_gate("X" + OUR + " me@host", OUR) is False
 
 
+def test_commented_adb_keys_line_matches():
+    """A real adb_keys line carries a "user@host" comment.
+
+    This is the 13:54/15:59 case: the line is 715 chars where the bare key is
+    700, so a whole-line comparison could never succeed and the gate reported
+    absent on a store adbd was accepting. The first-field form must match it.
+    """
+    commented = OUR + " ishanp@omarchy"
+    assert len(commented) > len(OUR), "the fixture must actually differ from the bare key"
+    assert exact_gate(commented, OUR) is True, \
+        "a commented adb_keys line must still match our bare key"
+
+
+def test_whole_line_form_would_fail_on_a_commented_line():
+    """Why first-field matching was needed: the whole-line form fails here.
+
+    Modelled explicitly rather than via exact_gate, which splits on whitespace
+    and so could never reproduce the failure.
+    """
+    commented = OUR + " ishanp@omarchy"
+
+    def whole_line(keys_file: str, ours: str) -> bool:
+        return any(line == ours for line in keys_file.splitlines() if line.strip())
+
+    assert whole_line(commented, OUR) is False, \
+        "this is the bug: whole-line matching cannot see a commented key"
+    assert exact_gate(commented, OUR) is True, "first-field matching can"
+
+
 if __name__ == "__main__":
     failures = 0
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")]
