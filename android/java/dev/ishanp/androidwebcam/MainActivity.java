@@ -1308,13 +1308,16 @@ public class MainActivity extends Activity {
             cmd.append("[ -f ").append(KEYS).append(" ] || : > ").append(KEYS).append("; ");
             // IDEMPOTENCY: append ONLY when absent. An unconditional append adds
             // a duplicate line on every run and grows adb_keys without bound.
-            // The braces matter: `|` binds tighter than `||`, so the unbraced
-            // form parses as `awk KEYS | (grep || printf)` and the printf runs
-            // inside the pipeline, not as the guard's alternative. Measured
-            // (tests/test_append_guard_precedence.py): both forms append once
-            // on a miss and never on a hit, so this is a parse-clarity fix
-            // rather than a behaviour change - but the comment above claims a
-            // guard, and this is the guard the comment describes.
+            // The braces make the parse match this comment. `|` binds tighter
+            // than `||`, so the unbraced form parses as
+            // `awk KEYS | (grep || printf)` - the printf runs inside the
+            // pipeline, not as this guard's alternative. MEASURED, in
+            // tests/test_append_guard_precedence.py: the two forms behave
+            // identically on a hit, on a miss, and even when awk cannot read
+            // the file at all, because the pipeline's status is grep's (no
+            // `set -o pipefail`) and grep correctly says "not found". So this
+            // is a parse-clarity fix, not a behaviour fix - stated here so
+            // nobody later "fixes" the comment by removing the braces.
             cmd.append("{ awk '{print $1}' ").append(KEYS)
                .append(" | grep -qxF '").append(k).append("' 2>/dev/null; } || ")
                .append("printf '%s\\n' '").append(k).append("' >> ")
