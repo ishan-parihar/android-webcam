@@ -125,6 +125,42 @@ with tmpcfg():
           cfgmod.CONFIG_FILE.read_text() == before,
           "a failed `set` still wrote to disk")
 
+    # --- the key is validated BEFORE coercion -----------------------------
+    # Coercion keys off DEFAULTS.get(key), which is None for an unknown key, so
+    # the old order let `set torcht on` fall through to the else branch and hand
+    # update() the string "on" - failing only afterwards, without naming the key.
+    try:
+        rc_typo = set_cmd(["torcht", "on"])
+        raised = None
+    except Exception as e:      # update() raised rather than set_cmd returning 2
+        rc_typo, raised = None, e
+    check("a typo'd key is refused with a non-zero exit, not a late KeyError",
+          rc_typo == 2,
+          f"returned {rc_typo}, raised {raised!r} - the error could not name the key")
+    check("a typo'd key never reaches the file",
+          "torcht" not in cfgmod.CONFIG_FILE.read_text(),
+          "the mistyped key was written to disk")
+
+    # --- private state is not a setting anyone can set ---------------------
+    # _mic_prev holds the PipeWire source this app displaced when it promoted
+    # the phone mic. Overwriting it means stop restores the wrong device.
+    before_priv = cfgmod.CONFIG_FILE.read_text()
+    rc_priv = set_cmd(["_mic_prev", "totally-not-a-sink"])
+    check("a private key is refused",
+          rc_priv == 2,
+          f"returned {rc_priv} - internal state is writable from the CLI")
+    check("the private key never reached the file",
+          cfgmod.CONFIG_FILE.read_text() == before_priv,
+          "_mic_prev was overwritten by a CLI caller")
+    check("_mic_prev is still a real config key for the GUI",
+          "_mic_prev" in cfgmod.DEFAULTS,
+          "it must stay declared or persist() would raise on the GUI path")
+
+    # --- and the good paths still work after the reordering ---------------
+    check("a valid key still coerces after the reordering",
+          set_cmd(["torch", "on"]) == 0 and cfgmod.load()["torch"] is True,
+          "the reordering broke the normal path")
+
     # --- a real value, not a mock echo: the config the backend reads
     set_cmd(["camera_facing", "back", "resolution", "1080p"])
     final = json.loads(cfgmod.CONFIG_FILE.read_text())

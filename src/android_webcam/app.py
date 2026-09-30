@@ -908,8 +908,33 @@ def set_cmd(argv):
     from .config import update as _update
     changes, i = {}, 0
     args = list(argv)
+
+    # Keys starting with "_" are private state, not settings. _mic_prev holds
+    # the PipeWire source this app displaced when it promoted the phone mic, so
+    # overwriting it means the next stop restores the wrong device - or, if set
+    # to garbage, that restore calls into a source name that does not exist.
+    # Anything running on the machine can invoke this verb, so it is closed here
+    # rather than left to the caller's discretion.
+    def _reject(key):
+        if key.startswith("_"):
+            print(f"set: {key} is internal state, not a setting", file=sys.stderr)
+            return True
+        if key not in DEFAULTS:
+            print(f"set: unknown setting {key!r}. Known settings: "
+                  f"{', '.join(sorted(k for k in DEFAULTS if not k.startswith('_')))}",
+                  file=sys.stderr)
+            return True
+        return False
+
     while i < len(args):
         key = args[i].lstrip("-").replace("-", "_")
+        # Validate BEFORE coercing. Coercion keys off DEFAULTS.get(key), which
+        # returns None for an unknown key, so `set torcht on` used to fall
+        # through to the else branch and be handed to update() as the string
+        # "on" - only for update() to raise, and by then the error could not say
+        # which key was wrong.
+        if _reject(key):
+            return 2
         if i + 1 >= len(args):
             print(f"set: {key} needs a value", file=sys.stderr)
             return 2
