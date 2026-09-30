@@ -1176,7 +1176,15 @@ public class MainActivity extends Activity {
         // negative is diagnosable from the log instead of needing root on the
         // host - adb_keys is root-only and reads as an empty string from a shell.
         String file = su("cat " + KEYS + " 2>/dev/null");
-        String s = su("grep -qxF '" + pub + "' " + KEYS + " 2>/dev/null && echo YES || echo NO");
+        // Normalise the FILE side too, exactly as the settings store does at :852.
+        // adb_keys lines carry a "user@host" comment - ours is 715 chars where
+        // the bare key is 700 - so `grep -qxF '<700ch>'` is a whole-line match
+        // against a 715-char line and can NEVER match. Measured at 13:54:
+        // "gate: cachedKey=700ch fileBytes=715ch cachedHasSpace=false -> NO",
+        // i.e. the gate reported false on a store adbd was accepting. Compare
+        // the FIRST FIELD of each line instead, which is correct whether or not
+        // adbd keeps the comment.
+        String s = su("awk '{print $1}' " + KEYS + " 2>/dev/null | grep -qxF '" + pub + "' && echo YES || echo NO");
         Log2.i("gate: cachedKey=" + pub.length() + "ch fileBytes=" + (file == null ? -1 : file.trim().length())
                 + "ch cachedHasSpace=" + pub.contains(" ") + " -> " + (s == null ? "null" : s.trim()));
         return s != null && s.trim().endsWith("YES");
@@ -1300,7 +1308,8 @@ public class MainActivity extends Activity {
             cmd.append("[ -f ").append(KEYS).append(" ] || : > ").append(KEYS).append("; ");
             // IDEMPOTENCY: append ONLY when absent. An unconditional append adds
             // a duplicate line on every run and grows adb_keys without bound.
-            cmd.append("grep -qxF '").append(k).append("' ").append(KEYS)
+            cmd.append("awk '{print $1}' ").append(KEYS)
+               .append(" | grep -qxF '").append(k).append("' ")
                .append(" 2>/dev/null || printf '%s\\n' '").append(k).append("' >> ")
                .append(KEYS).append("; ");
             // adbd silently ignores a mislabelled/wrongly-owned trust store, which
@@ -1339,7 +1348,7 @@ public class MainActivity extends Activity {
             // connects here instead of guessing 5555 against a random port.
             reportToHost(hostFrom);
 
-            boolean wrote = su("grep -qxF '" + k + "' " + KEYS + " && echo yes || echo no")
+            boolean wrote = su("awk '{print $1}' " + KEYS + " | grep -qxF '" + k + "' && echo yes || echo no")
                             .contains("yes");
             boolean hookWrote = su("test -s " + hook + "/adb_tcp.sh && echo yes || echo no")
                             .contains("yes");

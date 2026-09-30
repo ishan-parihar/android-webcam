@@ -135,7 +135,7 @@ below, which is the most important thing in this section.
 | the phone mic is opened exactly once | **was BROKEN, fixed in `3c5b2a1`** — webcam-then-mic-only put 2 scrcpy streams in `scrcpy_mic`, and the system mic carried the phone mic summed with itself (mean −70.0 dB one session, −54.7 dB two, +15.3 dB). The camera and microphone are one capture resource. Now 1 stream in both click orders, and the mic button is disabled while the webcam runs. | `pactl list sink-inputs` counts the scrcpy sink-inputs, and the level is compared across session counts — a dB reading alone cannot see a doubled source |
 | `mic_to_phone` sends host audio to the phone | **RETRACTED — does not exist** | `scrcpy --help`: `--audio-dup` is "capture and keep playing on the device" and is only valid with `--audio-source=playback`. scrcpy has no host→phone audio path. |
 | phone playback capture carries signal | **UNEXERCISED** — the path starts and registers a source, but no audio was playing on the phone during the test, so the −91.0 dB reading is a NULL result, not a pass or a fail | needs audio playing on the phone |
-| zero-key bootstrap (no key of ours in the store) | **PROVEN 13:43** — `wrote=true hook=true listening=true`; host logged `served key to 192.168.1.4`; `adb devices` went `unauthorized` -> `device`; `adb shell` ran | the store held 1 key, a FOREIGN one, so this is exactly the state that used to fake success. positive: our key is in `settings get secure authorized_adb_keys` (readable from the host) and adbd answers `device`, which it only does for a key in the FILE. negative: 13:15, old APK, same foreign key -> `1/1 present` -> straight to `advertising adb`, ZERO server requests. The 13:15/13:21 pair isolates the trust gate; 13:21/13:43 isolates the ufw rule |
+| zero-key bootstrap (no key of ours in the store) | **PROVEN 13:43** — `wrote=true hook=true listening=true`; host logged `served key to 192.168.1.4`; `adb devices` went `unauthorized` -> `device` | the store held 1 key, a FOREIGN one, so this is exactly the state that used to fake success. positive: our key is in `settings get secure authorized_adb_keys` (readable from the host) and adbd answers `device`, so the file is correct. It does NOT isolate that THIS app wrote it - on a rooted phone the platform's own approval writes that file, which is the counterexample from 11:29/12:12. negative: 13:15, the pre-fix gate, same store, `1/1 present` -> straight to `advertising adb` with ZERO server requests. The 13:15/13:21 pair isolates the trust gate; 13:21/13:43 isolates the ufw rule (13:21 already logged `present=false`, so it cannot be the gate pair) |
 | mic level is usable for speech | **sink-volume fix proven; speech usability NOT ESTABLISHED** — `ensure_null_sink` now forces 100%, and the attenuation it caused is measured: same capture chain, one session, sink as created mean −75.1 dB vs forced to 100% mean −36.1 dB, against a −91.0 dB floor. With the fix in place and no manual intervention the shipped default reads **mean −52.9 dB**. That is the whole evidence. | the floor is `max == mean == −91.0 dB` with scrcpy killed; a fresh sink and a pre-existing 20% sink were both checked to come up at `vol 1.00`. What is NOT shown: anyone speaking. One quiet-room sample cannot separate speech from ambient, so no speech-level claim is made. |
 
 ### Trust store: PROVEN at 13:43, and how it was nearly missed
@@ -176,6 +176,15 @@ invisible until the trust gate was fixed:
      the wait loop compared `float < deadline`, and `float < None` raises after
      the socket binds while py_compile passes. See
      tests/test_serve_key_modes.py.
+
+Causes 2 and the gate's second bug were both invisible until the app started
+logging what it actually compared. `trustFileHasHostKey()` now logs the cached
+key length, the byte length of what `cat KEYS` returned, and whether the cached
+value carried a comment. Without that line, cause 4 below was a guess.
+
+  4. **The gate matched the wrong field of the file.** See trap 11. The count
+     bug (cause 2) hid this one: both made the fast path read as needed when it
+     was not, and the count bug ran first.
 
 TWO STORES, which conflating them produced several wrong conclusions:
 
@@ -229,13 +238,23 @@ SEVEN TRAPS THAT PRODUCED WRONG CONCLUSIONS HERE, all mine:
   8. Reading `cat /data/misc/adb/adb_keys` as empty and then concluding
      "whole line DIFFERS (this is the bug)". Both verdicts compared our key
      against the empty string - the read never ran. Same shape as trap 3.
-  9. Claiming a comment-field mismatch caused 13:49's `present=false`. The
-     write path already strips the comment at :1287, so the cached key was
-     already bare. Refuted by reading the code; the comment in
-     hostPublicKey() now says so rather than repeating it.
+  9. Claiming a comment-field mismatch on the CACHED side caused 13:49's
+     `present=false`. provision() strips the comment at :1287 before caching,
+     so the cached value was already bare. Refuted by reading the code. The
+     comment in hostPublicKey() records that rather than repeating it.
   10. 13:49's firewall control is the LIVE one: `control probe 192.168.1.13:22
      (sshd, OPEN on this host) -> 0`, versus `-2` at 13:21. Same probe, same
      host, only the ufw rule changed.
+  11. Attributing 13:49's `present=false` to the wrong store. It was the FILE
+     side, not the cache, and only the gate's own instrumentation could say so:
+     `gate: cachedKey=700ch fileBytes=715ch cachedHasSpace=false -> NO`. The
+     cache was right; `adb_keys` lines carry a `user@host` comment
+     (`ishanp@omarchy`, 715 chars against a 700-char key), so a whole-line
+     `grep -qxF` could never match. Fixed at all three file-side call sites
+     (:1179, :1303, :1342) by comparing the first field, as :852 already did
+     for the settings store. See tests/test_adb_keys_first_field.py, which
+     runs both forms against a real adbkey.pub line: whole-line NO, first-field
+     YES, foreign key NO.
 
 ### On controls
 
