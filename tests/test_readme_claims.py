@@ -77,6 +77,20 @@ unknown = [f for f in readme_flags if f not in defined]
 check(f"all {len(readme_flags)} flags in the READMEs are real CLI flags",
       not unknown, f"documented but absent: {unknown}")
 
+# Flags in BARE backticks (`--v4l2-sink`) sit outside any `android-webcam` span,
+# so the span collector never sees them and they were unvalidated. Sweep them
+# too, minus the ones already counted from spans, minus fenced command lines.
+bare = set()
+for line in BOTH.splitlines():
+    if line.lstrip().startswith(("android-webcam ", "$ ", "```")) or "```" in line:
+        continue
+    bare |= set(re.findall(r"`(--[a-z][a-z0-9-]*)`", line))
+bare -= set(readme_flags)
+bare -= {"--dry-run"}
+unknown_bare = [f for f in sorted(bare) if f not in defined]
+check(f"all {len(bare)} bare-backtick flags in the README are real CLI flags",
+      not unknown_bare, f"documented but absent: {unknown_bare}")
+
 # The check must be able to say no: an invented flag sharing a prefix with a
 # real one is the exact case substring membership got wrong.
 check("the flag check rejects a prefix-extension of a real flag",
