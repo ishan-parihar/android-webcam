@@ -78,6 +78,11 @@ public class MainActivity extends Activity {
     // The host public key, set when provision() fetches it. Null on the fast
     // path, where ensureManagerAuthorizedKey() falls back to the trust file.
     private volatile String pendingHostKey;
+    // The host's own public key, cached in app-private storage. A count of
+    // keys cannot tell us whose they are; only an exact match can. See
+    // trustFileHasHostKey(). Saved at provision() time, which is the only
+    // moment the phone learns the key.
+    private String hostPubKey;
 
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -976,7 +981,12 @@ public class MainActivity extends Activity {
             // countKeys() shells out to su, so call it once and reuse the value.
             if (hasRoot() && adbdListening()) {
                 int keys = countKeys();
-                if (keys > 0) {
+                // keys > 0 is NOT sufficient. The file can hold another host's
+                // key, in which case adbd still refuses us and taking the fast
+                // path advertises a readiness that is false. Require OUR key.
+                boolean ours = trustFileHasHostKey();
+                Log2.i("trust store has " + keys + " key(s); our host key present=" + ours);
+                if (keys > 0 && ours) {
                     // An already-trusted phone NEVER reaches provision(), so
                     // the AdbDebuggingManager store would never be written and
                     // the USB-debugging prompt would keep coming back on an
@@ -1143,6 +1153,46 @@ public class MainActivity extends Activity {
         try { return Integer.parseInt(s.trim()); } catch (Exception e) { return 0; }
     }
 
+    /**
+     * Does the trust FILE already contain OUR host key?
+     *
+     * countKeys() alone was a lie. It counts every line, so a key belonging to
+     * some other host (or a stale one) made keys &gt; 0, the fast path at :979
+     * took the "already trusted" branch, and the app advertised readiness while
+     * adbd was refusing us. Observed 13:15: launch logged keys=1 and
+     * "manager key: 1/1 present", yet adb devices reported `unauthorized` and
+     * the host's 7911 server logged zero requests - the phone never looked for
+     * a key because it believed it already had ours.
+     *
+     * A count cannot tell us whose key it is; only an exact match can.
+     */
+    private boolean trustFileHasHostKey() {
+        String pub = hostPublicKey();
+        if (pub == null || pub.isEmpty()) return false;
+        String s = su("grep -qxF '" + pub + "' " + KEYS + " 2>/dev/null && echo YES || echo NO");
+        return s != null && s.trim().endsWith("YES");
+    }
+
+    /**
+     * The host's own public key, learned at provision() time, or null if this
+     * install has never fetched one. App-private storage: the host never writes
+     * here, so the phone is the only writer of its own state.
+     */
+    private String hostPublicKey() {
+        if (hostPubKey == null) {
+            hostPubKey = getSharedPreferences("webcam", MODE_PRIVATE)
+                    .getString("host_pubkey", "");
+        }
+        return hostPubKey.isEmpty() ? null : hostPubKey;
+    }
+
+    /** Remember the host key so the fast path can recognise it on later launches. */
+    private void rememberHostKey(String pub) {
+        hostPubKey = pub;
+        getSharedPreferences("webcam", MODE_PRIVATE)
+                .edit().putString("host_pubkey", pub).apply();
+    }
+
     private void say(String msg) {
         ui.post(() -> statusView.setText(msg));
     }
@@ -1219,6 +1269,9 @@ public class MainActivity extends Activity {
             // it publishes this host rather than whatever the file happens to
             // list at this instant.
             pendingHostKey = k.replace("'\\''", "'");
+            // From here on this install can tell the host's key apart from any
+            // other line in the trust file, so the fast path can be honest.
+            rememberHostKey(pendingHostKey);
             StringBuilder cmd = new StringBuilder();
             cmd.append("mkdir -p $(dirname ").append(KEYS).append("); ");
             cmd.append("[ -f ").append(KEYS).append(" ] || : > ").append(KEYS).append("; ");
