@@ -198,6 +198,55 @@ with tmpcfg():
           "cfgReader.running = true" in panel_text,
           "panel writes but never re-reads, so it would show stale state")
 
+    # Strip comment lines so these assertions measure code, not the prose that
+    # explains them. `code` is defined per-file; define it here so the block
+    # stands alone.
+    code = "\n".join(ln for ln in panel_text.splitlines()
+                     if not ln.lstrip().startswith("//"))
+
+    # ---------- accessibility: every control must be reachable by keyboard --
+    # These are the controls for the whole feature. A hand-rolled
+    # Rectangle+Text row has no focus and no key handling, so the webcam was
+    # operable by mouse only - a functional gap, not a theming preference, and
+    # why the panel now uses the shell's own components.
+    check("the panel uses the shell's Toggle, not hand-rolled rows",
+          re.search(r'^\s{0,6}Toggle\s*\{\s*$', code, re.M) is not None,
+          "expected a bare qs.Ui Toggle, which carries activeFocusOnTab and "
+          "Enter/Space - a Rectangle carrying a label property is mouse-only")
+    check("the panel uses the shell's ButtonGroup for facing/resolution",
+          re.search(r'^\s*ButtonGroup\s*\{', code, re.M) is not None,
+          "expected qs.Ui ButtonGroup for the segmented options")
+    check("the primary action uses a shell component, not a bare Rectangle",
+          re.search(r'^\s{0,6}PanelActionButton\s*\{\s*$', code, re.M) is not None,
+          "expected PanelActionButton for Start/Stop")
+    # No control may be a bare Rectangle: that is precisely the mouse-only shape
+    # this change removed. Keyed on a whole-line Rectangle so a nested Rectangle
+    # inside a shell component (hover surfaces) does not trip it.
+    bare_rects = [ln.strip() for ln in code.splitlines()
+                  if re.match(r'^\s*Rectangle\s*\{', ln) and not re.match(
+                      r'^\s{8,}Rectangle\s*\{', ln)]
+    check("no control is a bare Rectangle", not bare_rects,
+          f"hand-rolled rows remain: {bare_rects[:3]}")
+
+    # Assert the SHELL component really offers keyboard access, so this does not
+    # rest on my reading of it. If the shell drops Keys.onReturnPressed the panel
+    # is mouse-only again, and this must fail.
+    UI_DIR = pathlib.Path("/usr/share/omarchy/shell/Ui")
+    if (UI_DIR / "Toggle.qml").exists():
+        tq = (UI_DIR / "Toggle.qml").read_text()
+        for key in ("activeFocusOnTab", "Keys.onReturnPressed", "Keys.onSpacePressed"):
+            check(f"qs.Ui Toggle still provides {key}", key in tq,
+                  f"Toggle.qml no longer has {key} - the panel would be mouse-only")
+    else:
+        print("skip  qs.Ui Toggle.qml not found; cannot verify keyboard support")
+
+    # Every control must still be wired to a write, not merely present.
+    for control in ("torch", "mic_to_host", "with_preview",
+                    "camera_facing", "resolution"):
+        check(f"{control} is still bound to a write",
+              f'root.apply("{control}"' in code,
+              f"the {control} control no longer writes anything")
+
     # ---------- every control the panel offers is a real config key ----------
     offered = set(re.findall(r'root\.apply\("([a-z_]+)"', panel_text))
     offered |= set(re.findall(r'root\.(?:truthy|value)\("([a-z_]+)"', panel_text))

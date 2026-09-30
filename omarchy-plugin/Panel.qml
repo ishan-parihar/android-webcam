@@ -142,66 +142,58 @@ Panel {
       PanelSeparator { foreground: root.foreground }
 
       // --- start / stop -----------------------------------------------------
-      Rectangle {
-        width: parent.width; height: 42; radius: Style.cornerRadius
-        color: Util.alpha(Color.accent, 0.15)
-        Rectangle {
-          anchors.fill: parent; radius: parent.radius
-          color: Util.alpha(Color.foreground, 0.08)
-          visible: mouse.containsMouse
-        }
-        MouseArea {
-          id: mouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-          onClicked: toggleProc.running = true
-        }
-        Text {
-          anchors.centerIn: parent
-          text: root.streaming ? "󰅖  Stop webcam" : "󰄀  Start webcam"
-          color: Color.accent; font.family: root.fontFamily; font.bold: true
-        }
+      // Button, not a Rectangle + Text: it is the primary action and the old
+      // hand-rolled version had no keyboard path either.
+      PanelActionButton {
+        iconText: root.streaming ? "󰅖  Stop webcam" : "󰄀  Start webcam"
+        tooltipText: root.streaming ? "Stop the webcam stream" : "Start the webcam stream"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        fontSize: Style.font.subtitle
+        onClicked: toggleProc.running = true
       }
 
       // --- toggles ----------------------------------------------------------
-      // Each row is: label, state read from the FILE, and a switch. `onToggled`
-      // writes and then re-reads, so the switch shows what disk now says rather
-      // than what the user just asked for - if the write failed, it snaps back.
-      Row {
-        width: parent.width; spacing: Style.space(8)
-        Text { text: "Torch"; color: root.foreground; font.family: root.fontFamily
-               font.pixelSize: Style.font.body; width: parent.width - 90; verticalAlignment: Text.AlignVCenter }
-        ToggleSwitch {
-          checked: root.truthy("torch")
-          hasCursor: true
-          foreground: root.foreground
-          accent: Color.accent
-          onToggled: root.apply("torch", checked ? "on" : "off")
-        }
+      // qs.Ui's Toggle, not a hand-rolled Row+Text+Rectangle. It is what the
+      // other omarchy panels use, and it brings what a hand-rolled row cannot:
+      // activeFocusOnTab plus Enter/Space to activate. These are the controls
+      // for a feature with no keyboard path at all, which is an accessibility
+      // gap, not a theming preference.
+      //
+      // State is read from the FILE (cfgs), never from what was last clicked,
+      // and every write re-reads - so the switch shows what is on disk even if
+      // the GUI app or the CLI changed it.
+      Toggle {
+        label: "Torch"
+        description: "Camera light. Applies on next start."
+        checked: root.truthy("torch")
+        hasCursor: true
+        foreground: root.foreground
+        accent: Color.accent
+        fontFamily: root.fontFamily
+        onClicked: root.apply("torch", !root.truthy("torch") ? "on" : "off")
       }
 
-      Row {
-        width: parent.width; spacing: Style.space(8)
-        Text { text: "Phone mic → host"; color: root.foreground; font.family: root.fontFamily
-               font.pixelSize: Style.font.body; width: parent.width - 90; verticalAlignment: Text.AlignVCenter }
-        ToggleSwitch {
-          checked: root.truthy("mic_to_host")
-          hasCursor: true
-          foreground: root.foreground
-          accent: Color.accent
-          onToggled: root.apply("mic_to_host", checked ? "on" : "off")
-        }
+      Toggle {
+        label: "Phone mic → host"
+        description: "Routed through a null sink, so it does not play out your speakers."
+        checked: root.truthy("mic_to_host")
+        hasCursor: true
+        foreground: root.foreground
+        accent: Color.accent
+        fontFamily: root.fontFamily
+        onClicked: root.apply("mic_to_host", !root.truthy("mic_to_host") ? "on" : "off")
       }
 
-      Row {
-        width: parent.width; spacing: Style.space(8)
-        Text { text: "On-screen preview"; color: root.foreground; font.family: root.fontFamily
-               font.pixelSize: Style.font.body; width: parent.width - 90; verticalAlignment: Text.AlignVCenter }
-        ToggleSwitch {
-          checked: root.truthy("with_preview")
-          hasCursor: true
-          foreground: root.foreground
-          accent: Color.accent
-          onToggled: root.apply("with_preview", checked ? "on" : "off")
-        }
+      Toggle {
+        label: "On-screen preview"
+        description: "Show a window on the host. Applies on next start."
+        checked: root.truthy("with_preview")
+        hasCursor: true
+        foreground: root.foreground
+        accent: Color.accent
+        fontFamily: root.fontFamily
+        onClicked: root.apply("with_preview", !root.truthy("with_preview") ? "on" : "off")
       }
 
       PanelSeparator { foreground: root.foreground }
@@ -212,66 +204,43 @@ Panel {
       Row {
         width: parent.width; spacing: Style.space(8)
         Text { text: "Facing"; color: root.foreground; font.family: root.fontFamily
-               font.pixelSize: Style.font.body; width: parent.width - 90; verticalAlignment: Text.AlignVCenter }
-        Row {
-          spacing: Style.space(6)
-          Repeater {
-            model: ["back", "front"]
-            delegate: Rectangle {
-              required property string modelData
-              required property int index
-              readonly property bool active: root.value("camera_facing", "back") === modelData
-              width: 54; height: 28; radius: Style.cornerRadius
-              color: active ? Util.alpha(Color.accent, 0.25) : "transparent"
-              border.width: active ? 1 : 0
-              border.color: Color.accent
-              MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                          onClicked: root.apply("camera_facing", modelData) }
-              Text { anchors.centerIn: parent; text: modelData
-                     color: active ? root.foreground : Qt.darker(root.foreground, 1.4)
-                     font.family: root.fontFamily; font.pixelSize: Style.font.caption
-                     font.bold: active }
-            }
-          }
+               font.pixelSize: Style.font.body; width: 60; verticalAlignment: Text.AlignVCenter }
+        ButtonGroup {
+          width: parent.width - 60
+          options: ["back", "front"]
+          value: root.value("camera_facing", "back")
+          foreground: root.foreground
+          accent: Color.accent
+          fontFamily: root.fontFamily
+          onSelected: function(v) { root.apply("camera_facing", v) }
         }
       }
 
       Row {
         width: parent.width; spacing: Style.space(8)
         Text { text: "Resolution"; color: root.foreground; font.family: root.fontFamily
-               font.pixelSize: Style.font.body; width: parent.width - 90; verticalAlignment: Text.AlignVCenter }
-        Row {
-          spacing: Style.space(6)
-          Repeater {
-            model: ["720p", "1080p"]
-            delegate: Rectangle {
-              required property string modelData
-              readonly property bool active: root.value("resolution", "1080p") === modelData
-              width: 54; height: 28; radius: Style.cornerRadius
-              color: active ? Util.alpha(Color.accent, 0.25) : "transparent"
-              border.width: active ? 1 : 0
-              border.color: Color.accent
-              MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                          onClicked: root.apply("resolution", modelData) }
-              Text { anchors.centerIn: parent; text: modelData
-                     color: active ? root.foreground : Qt.darker(root.foreground, 1.4)
-                     font.family: root.fontFamily; font.pixelSize: Style.font.caption
-                     font.bold: active }
-            }
-          }
+               font.pixelSize: Style.font.body; width: 60; verticalAlignment: Text.AlignVCenter }
+        ButtonGroup {
+          width: parent.width - 60
+          options: ["720p", "1080p"]
+          value: root.value("resolution", "1080p")
+          foreground: root.foreground
+          accent: Color.accent
+          fontFamily: root.fontFamily
+          onSelected: function(v) { root.apply("resolution", v) }
         }
       }
 
       PanelSeparator { foreground: root.foreground }
 
-      Rectangle {
-        width: parent.width; height: 40; radius: Style.cornerRadius
-        color: Util.alpha(Color.accent, 0.15)
-        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                    onClicked: openGuiProc.running = true }
-        Text { anchors.centerIn: parent; text: "󰄀  Open full GUI"
-               color: Color.accent; font.family: root.fontFamily; font.bold: true }
-      }
+        PanelActionButton {
+          iconText: "󰄀  Open full GUI"
+          tooltipText: "Open the full settings window"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.body
+          onClicked: openGuiProc.running = true
+        }
     }
   }
 }
