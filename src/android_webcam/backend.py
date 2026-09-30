@@ -1,5 +1,5 @@
 """scrcpy ↔ v4l2 backend. Pure argv builder + lifecycle; no GTK."""
-import subprocess, shlex, shutil, time, json, os, logging, sys
+import subprocess, shlex, shutil, time, json, os, logging, sys, threading
 from pathlib import Path
 from .config import SIZES, load, save, target
 
@@ -1233,7 +1233,48 @@ def cli():
     print(" ".join(shlex.quote(s) for s in argv))
     if a.dry_run: return
     if not scrcpy_exists(): print("scrcpy not found — pacman -S scrcpy"); return
-    subprocess.run(argv)
+    # The null sink is NOT optional when forwarding the phone mic. scrcpy's
+    # --audio-source=mic plays the phone's mic into the DEFAULT SINK, so on this
+    # machine the microphone audio came out of the HDMI speakers and fed back
+    # into the host mic. The GUI has always done this (App._start_proc); the
+    # headless path did not, so every Start from the bar or panel - both of
+    # which go through here - leaked audio to the speakers. That is what the
+    # panel's "Phone mic -> host" toggle was reporting success while doing.
+    use_null_sink = bool(cfg.get("mic_to_host", True)) and not bool(cfg.get("mic_to_phone", False))
+    mic_state: dict = {}
+    if use_null_sink and not ensure_null_sink():
+        print("warning: could not create the null sink; the phone mic will play through "
+              "the default sink and can feed back into your speakers", file=sys.stderr)
+    if use_null_sink and cfg.get("mic_default", True):
+        # On a daemon thread, started BEFORE the run and never inline.
+        # set_phone_as_system_mic sleeps 1.5s, then moves the scrcpy sink-input
+        # onto the null sink, then verifies a stream exists before hijacking the
+        # default source. Inline it would run before scrcpy exists, so it would
+        # find nothing, return set=False, and the mic would stay on HDMI.
+        # subprocess.run blocks for the whole stream, so nothing can usefully
+        # run after it - which is why the promotion is threaded rather than
+        # sequenced. This mirrors App._start_proc (app.py:750-756).
+        def _promote_mic():
+            try:
+                mic_state.update(set_phone_as_system_mic(cfg))
+            except Exception as e:
+                logging.warning("mic default promotion failed: %s", e)
+        threading.Thread(target=_promote_mic, daemon=True, name="mic-default").start()
+    try:
+        subprocess.run(argv)
+    finally:
+        # Gate on "set", not truthiness: set_phone_as_system_mic returns a
+        # POPULATED dict with set=False when it declines to promote (scrcpy not
+        # ready, or it would clobber a real previous source). Restoring that
+        # would call restore_system_audio with a None previous source.
+        if mic_state.get("set"):
+            restore_system_audio(mic_state)
+        # Drop the sink so the next start re-runs ensure_null_sink(), which
+        # forces it to 100%: a null sink inherits a low default on this machine
+        # and that attenuates the phone mic by roughly 39 dB. Leaving the module
+        # loaded makes ensure_null_sink a no-op and the mic arrives too quiet.
+        if use_null_sink:
+            remove_null_sink()
 
 if __name__ == "__main__":
     cli()

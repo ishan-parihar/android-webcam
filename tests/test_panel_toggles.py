@@ -214,11 +214,21 @@ with tmpcfg():
           any("setsid" in e for e in execs),
           "a child of the panel's Process is killed when the panel closes")
 
-    # ---------- installed copy must match the repo ----------
-    if INSTALLED.exists():
-        check("installed Panel.qml is byte-identical to the repo",
-              INSTALLED.read_bytes() == PANEL.read_bytes(),
-              "installed copy has drifted; copy the repo file over it")
+    # ---------- installed copies must match the repo ----------
+    # Both files, not just the panel. The plugin had already drifted once this
+    # way: the installed copies carried a theme-compat fix the repo lacked, and
+    # the fix is only real once it is the copy Quickshell loads. Checking one
+    # file and assuming the other is a gap - the bar widget carried the same
+    # bare-launch defect for longer because nothing compared it.
+    for name in ("BarWidget.qml", "Panel.qml"):
+        inst = (pathlib.Path.home()
+                / ".config/omarchy/plugins/ishanp.android-webcam" / name)
+        if not inst.exists():
+            check(f"installed {name} exists", False, f"missing: {inst}")
+            continue
+        check(f"installed {name} is byte-identical to the repo",
+              inst.read_bytes() == (REPO / "omarchy-plugin" / name).read_bytes(),
+              f"installed copy has drifted; copy omarchy-plugin/{name} over it")
 
 real_after = REAL_CONFIG.read_bytes() if REAL_CONFIG.exists() else None
 check("the REAL config was never written", real_before == real_after,
