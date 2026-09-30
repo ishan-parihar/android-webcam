@@ -188,7 +188,7 @@ class App(Adw.Application):
         self.speaker_row.set_active(bool(self.cfg.get("mic_to_phone", False)))
         self.speaker_row.connect("notify::active", self.on_speaker)
         grp_extra.add(self.speaker_row)
-        self.audio_info = Gtk.Label(label="Default: phone mic is the system mic (no echo, via null sink). Spy: turn OFF ‘Make default’ to keep mic only for manual monitoring, or ON ‘Surveillance speaker’ to play host audio on phone.")
+        self.audio_info = Gtk.Label(label="Default: phone mic is the system mic (no echo, via null sink). To monitor without making it default, turn OFF ‘Make phone mic the system mic’ and start ‘Mic only’. ‘Capture phone playback to host’ is the opposite direction — it records what the phone is playing, it does not play host audio on the phone.")
         self.audio_info.set_wrap(True); self.audio_info.set_xalign(0)
         grp_extra.add(self.audio_info)
         # v4l2 sink + buffer
