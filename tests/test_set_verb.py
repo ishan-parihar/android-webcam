@@ -77,7 +77,7 @@ with tmpcfg():
           f"{detail} - `set` would open a window instead of writing")
 
     # --- seed the phone's pushed endpoint
-    cfgmod.save({**cfgmod.DEFAULTS, "android_ip": "192.168.1.4", "android_port": 5555})
+    cfgmod.update(android_ip="192.168.1.4", android_port=5555)
 
     # --- the basic panel toggle, as QML would send it
     rc = set_cmd(["torch", "on"])

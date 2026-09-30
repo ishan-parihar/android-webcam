@@ -1,7 +1,7 @@
 """scrcpy ↔ v4l2 backend. Pure argv builder + lifecycle; no GTK."""
 import subprocess, shlex, shutil, time, json, os, logging, sys, threading
 from pathlib import Path
-from .config import SIZES, load, save, target
+from .config import SIZES, load, target, update
 
 def scrcpy_exists() -> bool: return shutil.which("scrcpy") is not None
 def adb_exists() -> bool: return shutil.which("adb") is not None
@@ -631,25 +631,24 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False)
     candidates that come back 'offline' from adb, retries 3x with backoff.
     """
     import re as _re
-    from .config import save
     def _subnet():
-        try:
-            with open("/proc/net/route") as f:
-                for line in f.readlines()[1:]:
-                    parts = line.split()
-                    if parts[1] != "00000000" or not int(parts[3],16) & 2: continue
-                    iface = parts[0]
-                    r = subprocess.run(["ip","-4","addr","show",iface], capture_output=True, text=True, timeout=2)
-                    m = _re.search(r"inet (\d+\.\d+\.\d+)\/(\d+)", r.stdout)
-                    if m:
-                        import ipaddress
-                        net = ipaddress.ip_network(f"{m.group(1)}/{m.group(2)}", strict=False)
-                        return str(net.network_address), int(m.group(2)), iface
-        except Exception: pass
-        return ("192.168.1.0", 24, "wlan0")
+      try:
+          with open("/proc/net/route") as f:
+              for line in f.readlines()[1:]:
+                  parts = line.split()
+                  if parts[1] != "00000000" or not int(parts[3],16) & 2: continue
+                  iface = parts[0]
+                  r = subprocess.run(["ip","-4","addr","show",iface], capture_output=True, text=True, timeout=2)
+                  m = _re.search(r"inet (\d+\.\d+\.\d+)\/(\d+)", r.stdout)
+                  if m:
+                      import ipaddress
+                      net = ipaddress.ip_network(f"{m.group(1)}/{m.group(2)}", strict=False)
+                      return str(net.network_address), int(m.group(2)), iface
+      except Exception: pass
+      return ("192.168.1.0", 24, "wlan0")
     base,prefix,iface = _subnet()
     if prefix != 24:
-        return (False, f"non-/24 subnet ({prefix}) - manual IP needed")
+      return (False, f"non-/24 subnet ({prefix}) - manual IP needed")
     import concurrent.futures, socket
     tcp_timeout = 0.25 if quick else 0.4
     my_ip_prefix = base.rsplit('.', 1)[0]
@@ -766,9 +765,10 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False)
                                      capture_output=True, text=True, timeout=8)
                 model = sr.stdout.strip()
                 if model and "error" not in model.lower():
-                    cfg["android_ip"] = ip
-                    cfg["android_port"] = int(port)
-                    save(cfg)
+                    # update(), not save(cfg): this is a read-modify-write that
+                    # races the phone's own /phone push and a panel's `set`.
+                    # Writing the whole dict would revert a newer endpoint.
+                    update(android_ip=ip, android_port=int(port))
                     return (True, f"found {model} at {ip}:{port}")
                 time.sleep(0.5 * (attempt+1))
             except Exception as e:
@@ -791,9 +791,7 @@ def discover_phone(cfg: dict, gateway: str = "192.168.1.1", quick: bool = False)
                                      capture_output=True, text=True, timeout=8)
                 model = sr.stdout.strip()
                 if model and "error" not in model.lower():
-                    cfg["android_ip"] = ip
-                    cfg["android_port"] = int(port)
-                    save(cfg)
+                    update(android_ip=ip, android_port=int(port))
                     return (True, f"found {model} at {ip}:{port} (after kill+start)")
             except Exception: continue
     return (False, f"found adb on {found[:5]} but none responded to getprop after retries")
@@ -923,11 +921,11 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
             if not _is_ipv4(ip) or not (0 < port < 65536):
                 self.send_error(400); return
             try:
-                from .config import load as _load, save as _save
-                cfg = _load()
-                cfg["android_ip"] = ip
-                cfg["android_port"] = port
-                _save(cfg)
+                from .config import update as _update
+                # Merge under the lock, and touch ONLY the endpoint. The old
+                # whole-dict save could land before a panel `set` and silently
+                # roll the user's setting back.
+                _update(android_ip=ip, android_port=port)
                 logging.info("phone reported itself at %s:%s", ip, port)
                 print(f"  phone registered at {ip}:{port}", flush=True)
             except Exception as e:
@@ -1170,11 +1168,14 @@ def cli():
     if a.set_ip:
         if ":" in a.set_ip:
             ip,port = a.set_ip.rsplit(":",1)
-            cfg["android_ip"]=ip; cfg["android_port"]=int(port)
+            set_ip, set_port = ip, int(port)
         else:
-            cfg["android_ip"]=a.set_ip
-        save(cfg)
-        print(f"Saved IP {cfg['android_ip']}:{cfg['android_port']} to config")
+            set_ip, set_port = a.set_ip, None
+        # Merge rather than write the whole dict, so a concurrent panel `set`
+        # or phone push is not reverted by this one-field command.
+        written = update(android_ip=set_ip,
+                         **({"android_port": set_port} if set_port is not None else {}))
+        print(f"Saved IP {written['android_ip']}:{written['android_port']} to config")
         return
     if a.phone_log:
         # The phone writes into its own external files dir, which needs no

@@ -44,6 +44,18 @@ Panel {
   // Same self-match hazard as statusProc: `pkill -f` would match the shell
   // running it, so this could kill its own caller - or any terminal or editor
   // whose command line mentions scrcpy. `pkill -x` matches the name only.
+  // A preset is "write the settings, then start". `set` is a separate process
+  // that must finish before the stream is launched, or the stream would build
+  // its argv from the old config. Chain with && so a rejected key (a typo, an
+  // unknown setting) stops the start instead of silently running the previous
+  // configuration.
+  Process {
+    id: presetProc
+    property var args: []
+    command: ["bash", "-c",
+      "android-webcam set " + args.join(" ") +
+      " && setsid -f android-webcam --no-window"]
+  }
   Process { id: stopProc; command: ["bash","-c","pkill -x scrcpy ; echo stopped"] ; stdout: StdioCollector { onStreamFinished: statusProc.running = true } }
 
   BarIconButton {
@@ -89,7 +101,8 @@ Panel {
           Text { text: root.streaming ? "■  Stop" : "▶  Quick Start (back 720p)"; color: root.streaming ? Color.accent : root.foreground; font.family: root.fontFamily; font.bold: true; anchors.centerIn: parent; elide: Text.ElideRight; width: parent.width-12; horizontalAlignment: Text.AlignHCenter }
           MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
             if (root.streaming) stopProc.running = true
-            else { Quickshell.execDetached(["bash","-c","android-webcam --back --720 &"]); statusProc.running = true }
+                else { presetProc.args = ["camera_facing", "back", "resolution", "720p"]
+                       presetProc.running = true; statusProc.running = true }
           }}
         }
       }
@@ -97,19 +110,37 @@ Panel {
       Grid { columns: 2; width: parent.width; columnSpacing: Style.space(8); rowSpacing: Style.space(8)
         Rectangle { width: (parent.width-8)/2; height: 32; radius: Style.cornerRadius; color: Util.alpha(root.foreground,0.06)
           Text { text: "Front 720p"; color: root.foreground; font.family: root.fontFamily; anchors.centerIn: parent }
-          MouseArea { anchors.fill: parent; onClicked: Quickshell.execDetached(["bash","-c","android-webcam --front --720 &"]) }
+              // Presets go through `set` FIRST, then start. The old form passed
+              // `--back --720` to android-webcam, and cli() applies those to an
+              // in-memory cfg that it never saves - so the stream came up right
+              // but config.json still said the old facing and resolution, and
+              // the panel then displayed settings that were not in use. State
+              // that is not recorded is state the next surface cannot show.
+              MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
+                presetProc.args = ["camera_facing", "front", "resolution", "720p"]
+                presetProc.running = true
+              } }
         }
         Rectangle { width: (parent.width-8)/2; height: 32; radius: Style.cornerRadius; color: Util.alpha(root.foreground,0.06)
           Text { text: "Back 1080p"; color: root.foreground; font.family: root.fontFamily; anchors.centerIn: parent }
-          MouseArea { anchors.fill: parent; onClicked: Quickshell.execDetached(["bash","-c","android-webcam --back --1080 &"]) }
+              MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
+                presetProc.args = ["camera_facing", "back", "resolution", "1080p"]
+                presetProc.running = true
+              } }
         }
         Rectangle { width: (parent.width-8)/2; height: 32; radius: Style.cornerRadius; color: Util.alpha(root.foreground,0.06)
           Text { text: "Back + Torch"; color: root.foreground; font.family: root.fontFamily; anchors.centerIn: parent }
-          MouseArea { anchors.fill: parent; onClicked: Quickshell.execDetached(["bash","-c","android-webcam --back --720 --torch &"]) }
+              MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
+                presetProc.args = ["camera_facing", "back", "resolution", "720p", "torch", "on"]
+                presetProc.running = true
+              } }
         }
         Rectangle { width: (parent.width-8)/2; height: 32; radius: Style.cornerRadius; color: Util.alpha("#ff6b35",0.12)
           Text { text: "Mic ON (echo risk)"; color: "#ff6b35"; font.family: root.fontFamily; anchors.centerIn: parent }
-          MouseArea { anchors.fill: parent; onClicked: Quickshell.execDetached(["bash","-c","android-webcam --back --720 --with-audio &"]) }
+              MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
+                presetProc.args = ["camera_facing", "back", "resolution", "720p", "mic_to_host", "on"]
+                presetProc.running = true
+              } }
         }
       }
       Text { text: "Mic via --audio-source=mic → PulseAudio 'scrcpy'. Lower speakers or use headphones."; color: Qt.darker(root.foreground,1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; wrapMode: Text.Wrap; width: parent.width }

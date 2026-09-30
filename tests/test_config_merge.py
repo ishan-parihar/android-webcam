@@ -68,7 +68,7 @@ with tmpcfg():
     # Seed what the PHONE would have pushed: a real endpoint, discovered live.
     pushed = dict(cfgmod.DEFAULTS)
     pushed.update({"android_ip": "192.168.1.4", "android_port": 5555})
-    cfgmod.save(pushed)
+    cfgmod.update(**{k: v for k, v in pushed.items() if k in cfgmod.DEFAULTS})
 
     # --- the negative that matters: an unrelated edit keeps the pushed port ---
     cfgmod.update(torch=True)
@@ -85,7 +85,7 @@ with tmpcfg():
           f"torch is {on_disk['torch']}")
 
     # --- the reverse direction: the phone's push survives our settings save ---
-    cfgmod.save({**cfgmod.load(), "android_port": 7911})
+    cfgmod.update(android_port=7911)
     cfgmod.update(mic_to_host=False)
     after = cfgmod.load()
     check("a settings save does not revert a LATER push",

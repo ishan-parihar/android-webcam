@@ -77,26 +77,47 @@ def update(**changes) -> dict:
     only place the mistake is still visible.
 
     The write is atomic (temp file in the same directory + os.replace), so a
-    concurrent reader sees either the old file or the new one, never a
-    truncated one. There is no lock: config is a few hundred bytes, writes take
-    microseconds, and flock would not help across the GUI and a CLI process on
-    a config that is re-read wholesale.
+    concurrent reader sees either the old file or the new one, never a truncated
+    one. Atomic is not sufficient on its own: that makes each WRITE indivisible,
+    not the load-then-merge-then-replace sequence around it. Two writers could
+    both read android_port=0, both merge, and the second replace would discard
+    the first - which is how the phone's pushed endpoint gets lost. The lock
+    covers the whole read-modify-write, and it is a real one: a sibling lockfile
+    held across the read AND the replace, because the processes involved are
+    separate (the GUI, a panel-driven `set`, and the /phone handler serving an
+    HTTP request) and none of them can coordinate in memory.
+
+    Readers do NOT take the lock. os.replace is atomic, so a lock-free read sees
+    a complete file - it may see the previous one for a moment, which is
+    exactly what a read-modify-write retry under the lock then corrects.
     """
-    import os, tempfile
+    import fcntl, os, tempfile
     unknown = set(changes) - set(DEFAULTS)
     if unknown:
         raise KeyError(f"unknown config key(s): {', '.join(sorted(unknown))}")
     cfg = load()
     cfg.update(changes)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(CONFIG_DIR), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(cfg, indent=2))
-        os.replace(tmp, CONFIG_FILE)
-    except Exception:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    with open(str(CONFIG_DIR / "config.lock"), "w") as lk:
+        # Blocking, with a ceiling. A writer that never exits would otherwise
+        # wedge every settings change, including the phone's own endpoint push.
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            # Re-read INSIDE the lock. The load above happened before it was
+            # taken, so a concurrent writer may have committed in between; that
+            # snapshot is stale and merging onto it is the lost update.
+            cfg = load()
+            cfg.update(changes)
+            fd, tmp = tempfile.mkstemp(dir=str(CONFIG_DIR), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(json.dumps(cfg, indent=2))
+                os.replace(tmp, CONFIG_FILE)
+            except Exception:
+                Path(tmp).unlink(missing_ok=True)
+                raise
+        finally:
+            fcntl.flock(lk, fcntl.LOCK_UN)
     return cfg
 
 def load() -> dict:
@@ -120,8 +141,22 @@ def load() -> dict:
     return cfg
 
 def save(cfg: dict) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+    """REMOVED - use update(**changes).
+
+    This was an unlocked whole-dict write, and every caller of it was a
+    read-modify-write: it loaded a snapshot, changed two keys, and wrote the
+    lot back. That is a lost update waiting to happen - the phone pushes its
+    endpoint at runtime, and a snapshot taken before the push reverts it. It had
+    four call sites, all of which now use update(), which merges under a lock.
+
+    It is kept only as a hard error so an old caller fails loudly rather than
+    silently writing a stale snapshot.
+    """
+    raise NotImplementedError(
+        "config.save() is gone: it wrote the whole dict from a snapshot, which "
+        "reverts the endpoint the phone pushes at runtime. Use update(**changes), "
+        "which merges under a lock."
+    )
 
 def target(cfg: dict) -> str:
     return f"{cfg['android_ip']}:{cfg['android_port']}"

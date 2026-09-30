@@ -119,10 +119,9 @@ with tmpcfg():
           "the panel and the bar disagree on how to start the stream")
 
     # ---------- every control the panel offers is a real config key ----------
-    cfgmod.save({**cfgmod.DEFAULTS,
-                 "android_ip": "192.168.1.4", "android_port": 5555,
-                 "torch": False, "camera_facing": "back", "resolution": "1080p",
-                 "mic_to_host": False, "with_preview": False})
+    cfgmod.update(android_ip="192.168.1.4", android_port=5555, torch=False,
+                 camera_facing="back", resolution="1080p",
+                 mic_to_host=False, with_preview=False)
 
     # ---------- each control must change the real argv ----------
     base_cfg, base = argv_for()

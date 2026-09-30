@@ -4,7 +4,7 @@ gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")
 from gi.repository import Gtk, Adw, GLib, Gio
 import subprocess, threading, shlex, os, time, logging, sys
 from pathlib import Path
-from .config import load, save, update, SIZES, FPS_CHOICES
+from .config import load, update, SIZES, FPS_CHOICES
 from .backend import build_argv, adb_ping, connect_adb, discover_phone, quick_reachable, _wait_device_ready, _adb_shell_echo
 
 # log to /tmp for diagnosis when the GUI is launched via desktop file (no
