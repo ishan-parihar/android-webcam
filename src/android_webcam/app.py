@@ -882,7 +882,7 @@ class App(Adw.Application):
     def show_about(self):
         dlg = Adw.AboutWindow(transient_for=self.win, application_name="Android Webcam",
                               version="1.0.0", developer_name="ishanp",
-                              website="https://github.com/ishanp/android-webcam",
+                              website="https://github.com/ishan-parihar/android-webcam",
                               comments="Native scrcpy camera → v4l2loopback. Replaces Iriun.",
                               license_type=Gtk.License.MIT_X11)
         dlg.present()
@@ -1000,6 +1000,16 @@ def main():
         # if any CLI flag, run headless backend.cli instead of GUI — unless --gui forced
         if "--help" in sys.argv or "-h" in sys.argv:
             from .backend import cli as backend_cli
+            # The subcommands above are dispatched before argparse ever runs, so
+            # --help could not see them and the panel's whole control surface was
+            # undocumented. Print them here.
+            print("""\
+subcommands:
+  android-webcam set KEY VALUE [KEY VALUE ...]   write config (merged, atomic, locked)
+  android-webcam is-streaming                   print 'on' or 'off'
+  android-webcam stop                           stop the webcam only (not the screen mirror)
+
+flags:""")
             backend_cli(); return 0
         if "--dry-run" in sys.argv or any(a.startswith("--") for a in sys.argv[1:]):
             # let backend handle headless; detect GUI request via --gui

@@ -15,8 +15,8 @@ keywords = ["scrcpy", "webcam", "v4l2loopback", "android", "omarchy", "hyprland"
 classifiers = ["Environment :: X11 Applications", "License :: OSI Approved :: MIT License"]
 
 [project.urls]
-Homepage = "https://github.com/ishanp/android-webcam"
-Repository = "https://github.com/ishanp/android-webcam"
+Homepage = "https://github.com/ishan-parihar/android-webcam"
+Repository = "https://github.com/ishan-parihar/android-webcam"
 
 [project.scripts]
 android-webcam = "android_webcam.app:main"

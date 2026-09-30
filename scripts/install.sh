@@ -238,16 +238,16 @@ except Exception as e:
 PY
 fi
 # Omarchy plugin (bar-widget + panel) — copy from repo if newer
-if [[ -d "$ROOT/omarchy-plugin" ]]; then
+if [[ -d "$ROOT" ]]; then
   PLUG_DST="$HOME/.config/omarchy/plugins/ishanp.android-webcam"
   mkdir -p "$PLUG_DST"
-  for f in BarWidget.qml Panel.qml manifest.json; do
-    if [[ -f "$ROOT/omarchy-plugin/$f" ]]; then
-      if ! cmp -s "$ROOT/omarchy-plugin/$f" "$PLUG_DST/$f" 2>/dev/null; then
-        cp "$ROOT/omarchy-plugin/$f" "$PLUG_DST/$f" && echo "  plugin $f updated" || true
+    for f in BarWidget.qml Panel.qml manifest.json; do
+      if [[ -f "$ROOT/$f" ]]; then
+        if ! cmp -s "$ROOT/$f" "$PLUG_DST/$f" 2>/dev/null; then
+          cp "$ROOT/$f" "$PLUG_DST/$f" && echo "  plugin $f updated" || true
+        fi
       fi
-    fi
-  done
+    done
   for f in LICENSE README.md; do [[ -f "$ROOT/$f" ]] && cp "$ROOT/$f" "$PLUG_DST/$f" 2>/dev/null || true; done
   ok "Omarchy plugin synced to $PLUG_DST"
 fi

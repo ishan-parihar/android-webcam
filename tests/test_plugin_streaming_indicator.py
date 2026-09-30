@@ -31,7 +31,7 @@ import time
 
 HOME = pathlib.Path.home()
 PLUGIN = HOME / ".config/omarchy/plugins/ishanp.android-webcam/BarWidget.qml"
-SRC = pathlib.Path(__file__).resolve().parents[1] / "omarchy-plugin/BarWidget.qml"
+SRC = pathlib.Path(__file__).resolve().parents[1] / "BarWidget.qml"
 
 # Pull the statusProc command out of the QML. Parse the bracketed argv as JSON
 # rather than picking out quoted strings: a token regex captured only the FIRST
@@ -184,7 +184,7 @@ BAD_STOP = 'command: ["bash","-c","pkill -f'
 for path, label in ((PLUGIN, "installed bar"), (SRC, "repo bar"),
                     (PLUGIN.parent / "Panel.qml", "installed panel"),
                     (pathlib.Path(__file__).resolve().parents[1]
-                     / "omarchy-plugin/Panel.qml", "repo panel")):
+                     / "Panel.qml", "repo panel")):
     if not path.exists():
         continue
     text = path.read_text()

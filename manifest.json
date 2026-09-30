@@ -6,8 +6,8 @@
   "author": "ishanp",
   "description": "Native scrcpy camera \u2192 v4l2loopback. Back/front, 720p/1080p, torch, mic (echo warning). Replaces Iriun. Bar icon launches GTK app; panel has quick toggles.",
   "license": "MIT",
-  "homepage": "https://github.com/ishanp/android-webcam",
-  "repository": "https://github.com/ishanp/android-webcam",
+  "homepage": "https://github.com/ishan-parihar/android-webcam",
+  "repository": "https://github.com/ishan-parihar/android-webcam",
   "keywords": [
     "webcam",
     "scrcpy",

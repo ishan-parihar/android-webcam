@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO / "src"))
 from android_webcam import config as cfgmod  # noqa: E402
 from android_webcam import backend  # noqa: E402
 
-PANEL = REPO / "omarchy-plugin/Panel.qml"
+PANEL = REPO / "Panel.qml"
 INSTALLED = (pathlib.Path.home()
              / ".config/omarchy/plugins/ishanp.android-webcam/Panel.qml")
 
@@ -83,7 +83,7 @@ with tmpcfg():
     # checking the raw text flags the explanation rather than the defect - the
     # same mistake the pgrep -f check made one revision earlier.
     SHELL_METHODS = {"close", "show", "hide"}
-    for path in (PANEL, REPO / "omarchy-plugin/BarWidget.qml"):
+    for path in (PANEL, REPO / "BarWidget.qml"):
         text = path.read_text()
         code = re.sub(r'//[^\n]*', '', text)
         local = defined_functions(code)
@@ -93,7 +93,7 @@ with tmpcfg():
               not unresolved, f"called but never defined: {unresolved}")
 
     # ---------- the bar icon must actually control something -----------------
-    bar_text = (REPO / "omarchy-plugin/BarWidget.qml").read_text()
+    bar_text = (REPO / "BarWidget.qml").read_text()
     bar_code = re.sub(r'//[^\n]*', '', bar_text)
     handler = re.search(r'onPressed:\s*function\s*\([^)]*\)\s*\{(.*?)\n\s{4}\}',
                         bar_code, re.S)
@@ -125,7 +125,7 @@ with tmpcfg():
     # same executable - so the dot read "streaming" while the phone was
     # mirroring the desktop. Both surfaces must ask the app, which checks
     # /proc/<pid>/cmdline for --v4l2-sink.
-    for path in (PANEL, REPO / "omarchy-plugin/BarWidget.qml"):
+    for path in (PANEL, REPO / "BarWidget.qml"):
         text = path.read_text()
         execs = re.findall(r'command:\s*\[[^\]]*\]', text)
         check(f"{path.name} asks the app, not pgrep, whether a camera is running",
@@ -336,8 +336,8 @@ with tmpcfg():
             check(f"installed {name} exists", False, f"missing: {inst}")
             continue
         check(f"installed {name} is byte-identical to the repo",
-              inst.read_bytes() == (REPO / "omarchy-plugin" / name).read_bytes(),
-              f"installed copy has drifted; copy omarchy-plugin/{name} over it")
+              inst.read_bytes() == (REPO / name).read_bytes(),
+              f"installed copy has drifted; copy {name} over it")
 
 real_after = REAL_CONFIG.read_bytes() if REAL_CONFIG.exists() else None
 check("the REAL config was never written", real_before == real_after,

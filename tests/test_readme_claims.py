@@ -16,8 +16,12 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 README = (REPO / "README.md").read_text()
-PLUGIN_README = (REPO / "omarchy-plugin/README.md").read_text()
-BOTH = README + PLUGIN_README
+# The plugin lives at the repo ROOT: `omarchy plugin add` clones the repo and
+# reads the top-level manifest.json, and omarchy-plugin-validate refuses any
+# symlink inside a plugin folder, so a symlinked or duplicated second copy cannot
+# be made to work. There is one manifest and one Panel.qml, and they are these.
+PLUGIN_README = README
+BOTH = README
 
 failures = []
 
@@ -36,40 +40,49 @@ print("test_readme_claims: README statements match the repository")
 url = "https://github.com/ishan-parihar/android-webcam.git"
 check("README uses the real remote owner/repo", url in README,
       "found a github URL that is not the configured origin")
-check("no stale ishanp/ (not the owner) URL in either README",
+check("no stale ishanp/ (not the owner) URL in the README",
       "github.com/ishanp/" not in BOTH,
       "README points at a repo slug that does not exist")
 
 # --- every repo path mentioned must exist -----------------------------------
-paths = set(re.findall(r"`(?:\./)?((?:scripts|src|tests|omarchy-plugin|android|assets|docs)/[\w./-]+)`", BOTH))
+paths = set(re.findall(r"`(?:\./)?((?:scripts|src|tests|android|assets|docs)/[\w./-]+)`", BOTH))
 missing = sorted(p for p in paths if not (REPO / p).exists())
 check(f"all {len(paths)} repo paths named in the READMEs exist", not missing,
       f"missing: {missing}")
 
 # --- every flag mentioned must be a real flag -------------------------------
-# Only flags inside an `android-webcam ...` span are this CLI's. Scanning the
-# whole document picked up `--decode--` from the ASCII diagram and `--reload`
-# from `udevadm control --reload`, which are not ours.
-# The spans are matched across backtick fences, so a fenced block is flattened
-# first: a naive `` `android-webcam ([^`]+)` `` sees nothing in a ```bash fence
-# and the check silently passes on ZERO flags. Assert the count is non-zero.
-spans = re.findall(r"android-webcam((?:[^`\n]|`[^`\n]*`)*)", BOTH)
-# Drop a trailing `&& sudo udevadm control --reload ...` style continuation so
-# another tool's flags are not attributed to this CLI.
-flags = sorted({f for s in spans
-                for f in re.findall(r"(?<![\w-])--[a-z][a-z0-9-]+", s.split("&&")[0])})
+# Enumerate the REAL flag set, then assert each README flag is an exact member.
+# The earlier `f in source` was substring membership: it cannot separate
+# `--1080` from `--1080turbo`, so it passed on an invented flag. A design flaw,
+# not a typo - hence enumeration rather than a patched regex.
+# A span must be a real command: either a fenced line that starts with
+# `android-webcam`, or a backtick span whose content starts with it. Matching
+# anywhere swallowed `99-android-webcam.rules` and then `--reload` from a
+# udevadm continuation on the same line.
+readme_flags = sorted({
+    f for line in BOTH.splitlines()
+    for m in re.findall(r"(?:^android-webcam |`android-webcam )([^`\n]*)", line)
+    for f in re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", m.split("&&")[0])
+})
 check("the flag check actually collected flags (not a vacuous pass)",
-      len(flags) >= 5, f"only found {flags}")
-# subcommands are dispatched before argparse, so collect them too
-subs = sorted(set(re.findall(r"android-webcam (set|is-streaming|stop)\b", BOTH)))
+      len(readme_flags) >= 5, f"only found {readme_flags}")
 
 app = (REPO / "src/android_webcam/app.py").read_text()
 backend = (REPO / "src/android_webcam/backend.py").read_text()
 source = app + backend
-
-unknown = [f for f in flags if f not in source]
-check(f"all {len(flags)} flags in the READMEs are defined in the source",
+# argparse declarations, plus the literal allowlist tuple in main()
+defined = set(re.findall(r'add_argument\(\s*["\'](--[a-z0-9-]+)', source))
+defined |= set(re.findall(r'"(--[a-z0-9-]+)"', source))
+unknown = [f for f in readme_flags if f not in defined]
+check(f"all {len(readme_flags)} flags in the READMEs are real CLI flags",
       not unknown, f"documented but absent: {unknown}")
+
+# The check must be able to say no: an invented flag sharing a prefix with a
+# real one is the exact case substring membership got wrong.
+check("the flag check rejects a prefix-extension of a real flag",
+      "--1080turbo" not in defined and "--1080" in defined,
+      "defined set cannot distinguish --1080 from --1080turbo")
+subs = sorted(set(re.findall(r"android-webcam (set|is-streaming|stop)\b", BOTH)))
 
 for s in subs:
     check(f"subcommand '{s}' is dispatched in main()",
@@ -99,11 +112,14 @@ check("README does not claim install.sh writes a udev rule (it does not)",
       "README credits install.sh with a udev rule; it only chgrp/chmod")
 check("README documents the persistent udev rule as a manual fallback",
       "udev/rules.d" in README)
-check("install.sh copies the plugin from omarchy-plugin/ (the fixed copy)",
-      "omarchy-plugin" in install and "$ROOT/omarchy-plugin" in install)
+check("install.sh copies the plugin from the repo ROOT (one copy, no duplicate)",
+      "$ROOT/omarchy-plugin" not in install
+      and '"$ROOT/$f"' in install
+      and not (REPO / "omarchy-plugin").exists(),
+      "install.sh still reads omarchy-plugin/, which no longer exists")
 
 # --- the plugin's own control path -----------------------------------------
-panel = (REPO / "omarchy-plugin/Panel.qml").read_text()
+panel = (REPO / "Panel.qml").read_text()
 check("README's claim that the panel uses setsid -f is true",
       "setsid -f android-webcam --no-window" in panel)
 check("README's claim that Stop is camera-specific matches the panel",

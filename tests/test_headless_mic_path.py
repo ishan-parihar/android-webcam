@@ -165,7 +165,7 @@ check("with the mic off, scrcpy still starts",
 
 # --- both Start surfaces must reach this path ----------------------------
 for name in ("Panel.qml", "BarWidget.qml"):
-    text = (REPO / "omarchy-plugin" / name).read_text()
+    text = (REPO / name).read_text()
     check(f"{name} starts the stream through the headless path that is now fixed",
           "--no-window" in text,
           "without --no-window a bare `android-webcam` opens the GTK GUI instead")
