@@ -35,7 +35,12 @@ Panel {
   // Launch via setsid -f so the process is fully detached from Quickshell's
   // process group.  When Quickshell restarts (monitor change, theme reload,
   // etc.) the webcam must keep running, so we can't be a child of QML.
-  Process { id: launchProc; command: ["setsid","-f","android-webcam"] }
+  //
+  // --no-window is required, not optional: a bare `android-webcam` passes no
+  // flag that main()'s allowlist recognises, so it falls through to
+  // App().run() and opens the GTK window instead of streaming. Clicking the
+  // bar icon would pop a window and start nothing.
+  Process { id: launchProc; command: ["setsid","-f","android-webcam","--no-window"] }
   // Same self-match hazard as statusProc: `pkill -f` would match the shell
   // running it, so this could kill its own caller - or any terminal or editor
   // whose command line mentions scrcpy. `pkill -x` matches the name only.
@@ -47,13 +52,15 @@ Panel {
     bar: root.bar
     text: root.streaming ? "󰕧●" : "󰕧"
     // color hint when streaming
+    //
+    // Left and right button both toggle, and both branches are written out.
+    // The previous version called `root.toggle()`, which is defined nowhere -
+    // not here and not in the shell's BarWidget base - so a left click did
+    // nothing at all, silently. Right-click worked, which is why it read as
+    // "not fully efficacious" rather than as an error.
     onPressed: function(btn){
-      if (btn === Qt.RightButton) {
-        if (root.streaming) stopProc.running = true
-        else launchProc.running = true
-      } else {
-        root.toggle()
-      }
+      if (root.streaming) stopProc.running = true
+      else launchProc.running = true
     }
     onWheelMoved: function(delta){ /* wheel cycles front/back maybe */ }
   }

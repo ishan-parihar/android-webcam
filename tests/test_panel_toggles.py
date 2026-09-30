@@ -64,7 +64,61 @@ def argv_for(**over):
     return cfg, backend.build_argv(cfg, audio_owned=False)
 
 
+def defined_functions(text):
+    """Function names declared in this QML: `function name(` or `name: function(`."""
+    names = set(re.findall(r'function\s+(\w+)\s*\(', text))
+    names |= set(re.findall(r'^\s*(\w+)\s*:\s*function\s*\(', text, re.M))
+    return names
+
+
 with tmpcfg():
+    # ---------- every root.X() call in either QML must resolve -------------
+    # `root.toggle()` was called but defined nowhere - not in the file, not in
+    # the shell's BarWidget base - so a left click did nothing at all, silently.
+    # Right-click worked, which is why it read as a vague complaint rather than
+    # a bug report. Only method-call syntax is checked: a property reference
+    # like root.streaming is not a call, and the shell supplies some methods.
+    #
+    # Comments are stripped first. The fix documents the old bug by NAME, so
+    # checking the raw text flags the explanation rather than the defect - the
+    # same mistake the pgrep -f check made one revision earlier.
+    SHELL_METHODS = {"close", "show", "hide"}
+    for path in (PANEL, REPO / "omarchy-plugin/BarWidget.qml"):
+        text = path.read_text()
+        code = re.sub(r'//[^\n]*', '', text)
+        local = defined_functions(code)
+        calls = set(re.findall(r'root\.(\w+)\s*\(', code))
+        unresolved = sorted(calls - local - SHELL_METHODS)
+        check(f"{path.name}: every root.X() call resolves to a defined function",
+              not unresolved, f"called but never defined: {unresolved}")
+
+    # ---------- the bar icon must actually control something -----------------
+    bar_text = (REPO / "omarchy-plugin/BarWidget.qml").read_text()
+    bar_code = re.sub(r'//[^\n]*', '', bar_text)
+    handler = re.search(r'onPressed:\s*function\s*\([^)]*\)\s*\{(.*?)\n\s{4}\}',
+                        bar_code, re.S)
+    body = handler.group(1) if handler else ""
+    check("the bar icon's press handler starts or stops the stream",
+          "launchProc" in body and "stopProc" in body,
+          f"press handler does neither: {body.strip()[:70]}")
+    check("the press handler is not gated on one button only",
+          "Qt.RightButton" not in body,
+          "only right-click works, so left-click is a silent no-op")
+
+    bar_execs = re.findall(r'command:\s*\[[^\]]*\]', bar_text)
+    check("the bar's launch passes --no-window",
+          any("--no-window" in e for e in bar_execs),
+          "a bare `android-webcam` misses main()'s allowlist and opens the GUI")
+    check("the bar's launch is detached with setsid",
+          any("setsid" in e for e in bar_execs),
+          "without setsid the stream dies with the shell")
+
+    panel_text = PANEL.read_text()
+    check("bar and panel both start via setsid + --no-window",
+          any("setsid" in e for e in re.findall(r'command:\s*\[[^\]]*\]', panel_text)),
+          "the panel and the bar disagree on how to start the stream")
+
+    # ---------- every control the panel offers is a real config key ----------
     cfgmod.save({**cfgmod.DEFAULTS,
                  "android_ip": "192.168.1.4", "android_port": 5555,
                  "torch": False, "camera_facing": "back", "resolution": "1080p",
@@ -110,7 +164,6 @@ with tmpcfg():
           f"{after['android_ip']}:{after['android_port']}")
 
     # ---------- the panel drives `set`, not the file ----------
-    panel_text = PANEL.read_text()
     check("the panel writes through the `set` merge writer",
           '"android-webcam", "set"' in panel_text,
           "panel does not invoke `set`; a direct file write can clobber the port")
