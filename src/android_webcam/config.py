@@ -24,10 +24,12 @@ DEFAULTS = {
     #                   by default.  Enable if you hear echo/feedback (e.g.
     #                   your phone is sitting near your speakers and you have
     #                   a mic-monitoring app open).
-    #   mic_to_phone : also forward host microphone back to phone audio output.
-    #                   Enables a phone-side mic that captures host audio
-    #                   (e.g. for a phone-as-speaker use case).  OFF by
-    #                   default to avoid feedback loops with phone speakers.
+    #   mic_to_phone : capture the PHONE'S OWN audio playback back to the host
+    #                   (scrcpy --audio-source=playback --audio-dup), which
+    #                   keeps playing on the device.  This is NOT host -> phone
+    #                   audio: scrcpy has no host-to-phone audio path, so the
+    #                   earlier "phone-as-speaker" description was wrong.
+    #                   OFF by default.
     #   mic_default  : promote the forwarded phone mic to the system default
     #                   input source at startup.  ON by default.  Apps
     #                   (browser, zoom, etc.) pick it up without any manual

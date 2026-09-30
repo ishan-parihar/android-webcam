@@ -116,10 +116,24 @@ def audio_flags(cfg: dict) -> list[str]:
 
       mic_to_host  (default ON)  -> --audio-source=mic  (to null sink, no echo)
       mic_to_phone (default OFF) -> --audio-source=playback --audio-dup
-                                     (host audio -> phone speakers; use phone
-                                      as a remote speakerphone)
+                                     (CAPTURES THE PHONE'S OWN PLAYBACK back to
+                                      the host, keeping playback on the device)
       mic_mute     (default False) -> pactl set-source-mute on null monitor
       mic_default  (default True)  -> pactl set-default-source null monitor
+
+    CORRECTION, found by measurement not by assuming. This used to read
+    "host audio -> phone speakers; use phone as a remote speakerphone". That
+    is NOT what scrcpy does. `scrcpy --help` on 4.1: --audio-dup is "Duplicate
+    audio (capture and keep playing on the device). This feature is only
+    available with --audio-source=playback." It captures what the PHONE is
+    playing and delivers it to the HOST. scrcpy has no host->phone audio path
+    at all, so the old wording described a feature that cannot exist.
+
+    Verified: such a session registers a scrcpy source, but capturing it gave
+    mean_volume -91.0 dB with max_volume == mean, i.e. digital silence,
+    because nothing was playing on the phone at that moment. The capture path
+    is live; there was no signal to capture. A real test of this mode needs
+    audio actually playing on the phone.
     """
     mic_to_host = bool(cfg.get("mic_to_host", True))
     mic_to_phone = bool(cfg.get("mic_to_phone", False))
@@ -1099,8 +1113,8 @@ def cli():
     g.add_argument("--no-mic", action="store_true", help="disable mic forwarding (no --audio-source)")
     g.add_argument("--mic", action="store_true", help="forward phone mic to host (muted by default)")
     g.add_argument("--mic-mute-off", action="store_true", help="forward mic and unmute (no echo protection)")
-    g.add_argument("--mic-to-speaker", action="store_true", help="forward host mic to phone speakers (--audio-source=playback --audio-dup)")
-    g.add_argument("--mic-and-speaker", action="store_true", help="forward phone mic to host AND host mic to phone (full duplex)")
+    g.add_argument("--mic-to-speaker", action="store_true", help="capture the phone's OWN playback to host (--audio-source=playback --audio-dup); NOT host->phone audio")
+    g.add_argument("--mic-and-speaker", action="store_true", help="phone mic to host AND phone playback captured to host (full duplex)")
     p.add_argument("--with-preview", action="store_true"); p.add_argument("--no-window", action="store_true")
     p.add_argument("--v4l2-sink", default=None); p.add_argument("--dry-run", action="store_true")
     p.add_argument("--discover", action="store_true", help="Scan LAN for phone adb and update config")

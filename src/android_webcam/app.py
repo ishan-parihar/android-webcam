@@ -184,7 +184,7 @@ class App(Adw.Application):
         self.mic_default_row.set_active(bool(self.cfg.get("mic_default", True)))
         self.mic_default_row.connect("notify::active", self.on_mic_default)
         grp_extra.add(self.mic_default_row)
-        self.speaker_row = Adw.SwitchRow(title="Surveillance speaker (host → phone)", subtitle="OFF by default. Forwards computer audio to phone speaker — use phone as remote speaker/surveillance. Keep OFF to avoid feedback when mic is on.")
+        self.speaker_row = Adw.SwitchRow(title="Capture phone playback to host", subtitle="OFF by default. Streams what the PHONE is playing back to this computer, while playback continues on the device. It does NOT send this computer's audio to the phone — scrcpy cannot do that.")
         self.speaker_row.set_active(bool(self.cfg.get("mic_to_phone", False)))
         self.speaker_row.connect("notify::active", self.on_speaker)
         grp_extra.add(self.speaker_row)
