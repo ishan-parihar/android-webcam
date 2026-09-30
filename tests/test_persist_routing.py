@@ -194,13 +194,20 @@ check("concurrent update() calls do not lose a write", lost == 0,
       f"lost an update in {lost}/{TRIALS} trials - the lock is not covering the "
       f"whole read-modify-write")
 
-# The above is a SMOKE test, not a regression test: it passes on an unlocked
-# implementation on this machine (measured: 0/200 lost with the flock removed),
-# because the window is sub-millisecond and the GIL hides it. What can be
-# demonstrated is that the lock is actually HELD - a writer holding config.lock
-# must block update() for as long as it holds it. That is the claim worth
-# pinning; the lost-update check only guards against a future change that makes
-# the window much wider.
+# The above is the load-bearing half: with the flock removed it loses
+# 151-200 of 200 across five independent runs, and 0/200 with the lock in place.
+# It is kept because that is the property the lock exists for.
+#
+# An earlier version of this comment claimed the opposite - that the race did
+# not reproduce here (0/200 with the flock removed). That number came from a
+# broken injection: deleting the two flock lines left `finally:` with an empty
+# body, so the module raised IndentationError on import and the probe never ran
+# unlocked code at all. The 0/200 was measuring nothing.
+#
+# The second check pins that the lock is actually TAKEN, which is the property
+# that was previously unverified: a writer holding config.lock must block
+# update() for as long as it holds it. Removing the flock makes it return in
+# ~0.001s instead of waiting out the hold.
 import time  # noqa: E402
 
 with tmpcfg():
