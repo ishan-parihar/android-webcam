@@ -218,35 +218,69 @@ def apply_mic_mute(cfg: dict) -> bool:
     return False
 
 
-def scrcpy_is_camera() -> bool:
-    """True when a scrcpy process is running the WEBCAM, not the screen mirror.
+def scrcpy_camera_pids(proc_root: Path | None = None) -> list[int]:
+    """PIDs of scrcpy processes running the WEBCAM.
 
-    Both are the same executable, so `pgrep -x scrcpy` cannot tell them apart -
-    which is how the bar's dot came to report "streaming" while the phone was
-    mirroring the desktop. The webcam is the one carrying `--v4l2-sink`, so that
-    is the discriminator.
+    Both the webcam and the screen mirror are the same executable, so the process
+    NAME cannot tell them apart - `pgrep -x scrcpy` reports "streaming" while the
+    phone is mirroring the desktop. The webcam is the one carrying
+    `--v4l2-sink`.
 
-    Reads /proc/<pid>/cmdline rather than running pgrep: pgrep is a separate
-    process whose own cmdline would match a -f pattern, and enumerating /proc
-    keeps the check exact. Returns False when there is no scrcpy at all.
+    Reads /proc rather than shelling out to pgrep: pgrep is itself a process
+    whose command line would match a -f pattern, and enumerating /proc keeps the
+    check exact. `proc_root` is injectable so a test can pass a directory of real
+    files instead of patching pathlib.
+
+    comm is the executable's name, not argv[0], so a binary that merely ARGS
+    itself "scrcpy" does not qualify.
     """
-    for entry in Path("/proc").iterdir():
+    root = proc_root or Path("/proc")
+    found = []
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
         if not entry.name.isdigit():
             continue
         try:
-            exe = (entry / "comm").read_text().strip()
-            if exe != "scrcpy":
+            if (entry / "comm").read_text().strip() != "scrcpy":
                 continue
             cmdline = (entry / "cmdline").read_bytes().split(b"\0")
-        except (OSError, PermissionError):
+        except (OSError, ValueError):
             continue
-        if any(a == b"--v4l2-sink" or a.startswith(b"--v4l2-sink=") for a in cmdline):
-            return True
-    return False
+        # scrcpy accepts both `--v4l2-sink=/dev/video0` and a split
+        # `--v4l2-sink /dev/video0`, so both forms must match.
+        if any(a == b"--v4l2-sink" or a.startswith(b"--v4l2-sink=")
+               for a in cmdline):
+            found.append(int(entry.name))
+    return found
 
 
-# Private alias for the GUI's call site, matching how it refers to helpers there.
-_scrcpy_is_camera = scrcpy_is_camera
+def scrcpy_is_camera(proc_root: Path | None = None) -> bool:
+    """True when a scrcpy process is running the WEBCAM, not the screen mirror."""
+    return bool(scrcpy_camera_pids(proc_root))
+
+
+def stop_camera_stream(proc_root: Path | None = None) -> int:
+    """Kill only the WEBCAM scrcpy processes. Returns how many were signalled.
+
+    This exists because `pkill -x scrcpy` is camera-blind: android-screen is a
+    real scrcpy wrapper on this machine, so stopping the webcam would also stop
+    a screen-mirror session. Signalling the specific PIDs leaves the mirror
+    running.
+
+    SIGTERM, not SIGKILL, so scrcpy gets to close the v4l2 node cleanly; a
+    killed -9 leaves the loopback device held by a zombie.
+    """
+    import signal
+    pids = scrcpy_camera_pids(proc_root)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return len(pids)
 
 
 def _move_scrcpy_to_null_sink() -> bool:

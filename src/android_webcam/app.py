@@ -673,20 +673,16 @@ class App(Adw.Application):
         # Without this, IP hops leave two scrcpys (e.g. .8 and .12) and two
         # sink-inputs — one moves to null sink, the other stays on HDMI (echo).
         #
-        # -x (exact name) and not -f, deliberately. -f matches the FULL command
-        # line, so it kills this app's own caller as well as anything else that
-        # merely mentions the pattern: an editor with the file open, a terminal
-        # running `tail -f scrcpy.log`, a grep. My earlier note that "-f is safe
-        # here" only covered the immediate caller, and the real blast radius is
-        # every process on the machine whose cmdline contains those words -
-        # including the user's own work.
-        #
-        # -x cannot be selective between two scrcpy processes, so the camera
-        # check is done first: if the only scrcpy running is a screen-mirror
-        # session, this leaves it alone instead of killing the desktop mirror.
+        # Stop the WEBCAM by pid, not with `pkill -f` or even `pkill -x`:
+        #   -f matches the full command line, so it kills this app's own caller
+        #     and anything else naming the pattern (an editor, `tail -f`, a grep)
+        #   -x matches the NAME, which the screen-mirror session also has -
+        #     android-screen is a real scrcpy wrapper here, so it would be killed
+        #     as collateral
+        # stop_camera_stream() signals only the pids whose cmdline carries
+        # --v4l2-sink, so a mirror running alongside is left alone.
         try:
-            if _scrcpy_is_camera():
-                subprocess.run(["pkill","-x","scrcpy"], capture_output=True, timeout=3)
+            if _b.stop_camera_stream():
                 time.sleep(0.6)
         except Exception: pass
         # If a separate audio-only session is already up, it owns the phone mic;
@@ -964,6 +960,13 @@ def main():
         # requires --v4l2-sink, which only the webcam carries.
         from .backend import scrcpy_is_camera
         print("on" if scrcpy_is_camera() else "off")
+        return 0
+    if len(sys.argv) > 1 and sys.argv[1] == "stop":
+        # Stops only the WEBCAM. `pkill -x scrcpy` is camera-blind, and
+        # android-screen is a real scrcpy wrapper on this machine, so a blanket
+        # kill also tears down a screen-mirror session.
+        from .backend import stop_camera_stream
+        print("stopped" if stop_camera_stream() else "not running")
         return 0
     # CLI passthrough: android-webcam --front --720 etc without GUI
     if any(a in sys.argv for a in ("--help","-h","--dry-run","--front","--back","--720","--1080","--torch","--with-audio","--no-window","--with-preview")) and "--gui" not in sys.argv:

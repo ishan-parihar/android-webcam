@@ -109,8 +109,12 @@ Panel {
   // same trap as the old `set` subcommand.
   Process {
     id: toggleProc
+    // `stop` and not `pkill -x scrcpy`: the mirror is the same executable, so a
+    // blanket kill would also tear down a screen-mirror session. Both the read
+    // (is-streaming) and the write (stop) go through the app, so the dot and the
+    // action agree on what "the camera" means.
     command: ["bash", "-c",
-      "if android-webcam is-streaming | grep -q on; then pkill -x scrcpy; echo stopped; " +
+      "if android-webcam is-streaming | grep -q on; then android-webcam stop; " +
       "else setsid -f android-webcam --no-window; echo started; fi"]
   }
 

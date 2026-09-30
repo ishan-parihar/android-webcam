@@ -63,7 +63,12 @@ Panel {
       "android-webcam set " + args.join(" ") +
       " && setsid -f android-webcam --no-window"]
   }
-  Process { id: stopProc; command: ["bash","-c","pkill -x scrcpy ; echo stopped"] ; stdout: StdioCollector { onStreamFinished: statusProc.running = true } }
+  // Stops only the WEBCAM. `pkill -x scrcpy` is camera-blind: android-screen is
+  // a real scrcpy wrapper on this machine, so a blanket kill also tears down a
+  // screen-mirror session. `stop` signals only the pids whose command line
+  // carries --v4l2-sink. Invoked directly, not through a shell, so no pattern
+  // ever appears in a command line that a -f match could pick up.
+  Process { id: stopProc; command: ["android-webcam", "stop"] ; stdout: StdioCollector { onStreamFinished: statusProc.running = true } }
 
   BarIconButton {
     id: button

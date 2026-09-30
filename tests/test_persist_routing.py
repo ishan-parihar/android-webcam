@@ -82,52 +82,46 @@ check("config.save() refuses to run rather than writing a stale snapshot",
 # --- the camera/mirror discriminator, behaviourally -----------------------
 # pgrep -x scrcpy matches the NAME, and the screen-mirror session is the same
 # executable, so a name-only check reports "streaming" while the phone is
-# mirroring the desktop. The dot must be able to tell them apart. Driven with
-# /proc synthesised, so this exercises the actual discriminator rather than
-# asserting on source text - which has fooled this session three times.
+# mirroring the desktop. This drives the real function against a directory of
+# real files via its proc_root parameter - no monkeypatching, and no fixed
+# /tmp filenames for parallel runs to collide on.
 import pathlib as _pl  # noqa: E402
+import tempfile as _tf  # noqa: E402
 from android_webcam import backend as _b  # noqa: E402
 
-_real_iterdir = _pl.Path.iterdir
+
+def _fake_proc_root(specs):
+    """specs: {pid: (comm_bytes, cmdline_bytes)} -> a directory shaped like /proc."""
+    root = _pl.Path(_tf.mkdtemp())
+    for pid, (comm, cmdline) in specs.items():
+        d = root / str(pid)
+        d.mkdir()
+        (d / "comm").write_bytes(comm)
+        (d / "cmdline").write_bytes(cmdline)
+    return root
 
 
-def _fake_proc(name, comm, cmdline):
-    class _E:
-        def __init__(self):
-            self.name = name
+CAMERA = (b"scrcpy", b"scrcpy\x00--v4l2-sink=/dev/video0\x00")
+CAMERA_SPLIT = (b"scrcpy", b"scrcpy\x00--v4l2-sink\x00/dev/video0\x00")
+MIRROR = (b"scrcpy", b"scrcpy\x00--display-id=0\x00")
+SHELL = (b"bash", b"bash\x00-c\x00pgrep -x scrcpy\x00")
+UNRELATED = (b"firefox", b"firefox\x00scrcpy\x00")
 
-        def __truediv__(self, part):
-            p = _pl.Path(f"/tmp/_fp_{name}_{part}")
-            if part == "comm":
-                p.write_text(comm if isinstance(comm, str) else comm.decode())
-            else:
-                p.write_bytes(cmdline)
-            return p
-    return _E()
-
-
-def _detect(comm, cmdline):
-    _pl.Path.iterdir = lambda self: iter([_fake_proc("999", comm, cmdline)])
-    try:
-        return _b.scrcpy_is_camera()
-    finally:
-        _pl.Path.iterdir = _real_iterdir
-
-
-for label, comm, cmd, want in (
-    ("webcam (--v4l2-sink=/dev/video0)", b"scrcpy",
-     b"scrcpy\x00--v4l2-sink=/dev/video0\x00", True),
-    ("webcam (--v4l2-sink as a split arg)", b"scrcpy",
-     b"scrcpy\x00--v4l2-sink\x00/dev/video0\x00", True),
-    ("screen mirror (no v4l2 sink)", b"scrcpy",
-     b"scrcpy\x00--display-id=0\x00", False),
-    ("a shell merely mentioning scrcpy", b"bash",
-     b"bash\x00-c\x00pgrep -x scrcpy\x00", False),
-    ("an unrelated process", b"firefox", b"firefox\x00scrcpy\x00", False),
+for label, specs, want_pids, want_bool in (
+    ("webcam (--v4l2-sink=/dev/video0)", {"111": CAMERA}, [111], True),
+    ("webcam (--v4l2-sink as a split arg)", {"112": CAMERA_SPLIT}, [112], True),
+    ("screen mirror (no v4l2 sink)", {"113": MIRROR}, [], False),
+    ("a shell merely mentioning scrcpy", {"114": SHELL}, [], False),
+    ("an unrelated process", {"115": UNRELATED}, [], False),
+    ("camera and mirror together", {"116": CAMERA, "117": MIRROR}, [116], True),
+    ("nothing at all", {}, [], False),
 ):
+    root = _fake_proc_root(specs)
+    got_pids = _b.scrcpy_camera_pids(root)
+    got_bool = _b.scrcpy_is_camera(root)
     check(f"camera detection: {label}",
-          _detect(comm, cmd) is want,
-          f"returned {_detect(comm, cmd)}, expected {want}")
+          got_pids == want_pids and got_bool is want_bool,
+          f"pids={got_pids} (want {want_pids}), is_camera={got_bool} (want {want_bool})")
 
 # --- behavioural: drive the real arithmetic ------------------------------
 class tmpcfg:

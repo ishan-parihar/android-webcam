@@ -182,8 +182,15 @@ for path, label in ((PLUGIN, "installed"), (SRC, "repo")):
     text = path.read_text()
     check(f"{label} stop check is not pkill -f", BAD_STOP not in text,
           "stopProc could pkill the shell running it, or any editor naming scrcpy")
-    check(f"{label} stop check uses pkill -x", "pkill -x scrcpy" in text,
-          "expected pkill -x scrcpy")
+    # pkill -x is no longer acceptable either: it matches the NAME, and the
+    # screen-mirror session is the same executable, so stopping the webcam would
+    # also stop a mirror (android-screen is a real scrcpy wrapper here).
+    check(f"{label} stop is not a blanket pkill",
+          "pkill" not in "\n".join(re.findall(r'command:\s*\[[^\]]*\]', text)),
+          "expected the `stop` verb, which signals only camera pids")
+    check(f"{label} stop check uses the camera-scoped verb",
+          '"android-webcam", "stop"' in text or '"android-webcam","stop"' in text,
+          "expected command: [\"android-webcam\", \"stop\"]")
 
 FAKE_BIN.unlink(missing_ok=True)
 FAKE_SRC.unlink(missing_ok=True)
