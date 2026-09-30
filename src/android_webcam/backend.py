@@ -218,6 +218,37 @@ def apply_mic_mute(cfg: dict) -> bool:
     return False
 
 
+def scrcpy_is_camera() -> bool:
+    """True when a scrcpy process is running the WEBCAM, not the screen mirror.
+
+    Both are the same executable, so `pgrep -x scrcpy` cannot tell them apart -
+    which is how the bar's dot came to report "streaming" while the phone was
+    mirroring the desktop. The webcam is the one carrying `--v4l2-sink`, so that
+    is the discriminator.
+
+    Reads /proc/<pid>/cmdline rather than running pgrep: pgrep is a separate
+    process whose own cmdline would match a -f pattern, and enumerating /proc
+    keeps the check exact. Returns False when there is no scrcpy at all.
+    """
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            exe = (entry / "comm").read_text().strip()
+            if exe != "scrcpy":
+                continue
+            cmdline = (entry / "cmdline").read_bytes().split(b"\0")
+        except (OSError, PermissionError):
+            continue
+        if any(a == b"--v4l2-sink" or a.startswith(b"--v4l2-sink=") for a in cmdline):
+            return True
+    return False
+
+
+# Private alias for the GUI's call site, matching how it refers to helpers there.
+_scrcpy_is_camera = scrcpy_is_camera
+
+
 def _move_scrcpy_to_null_sink() -> bool:
     """Find ALL scrcpy sink-inputs and move them to the null sink.
     This prevents echo: phone mic → HDMI speakers → host mic feedback.

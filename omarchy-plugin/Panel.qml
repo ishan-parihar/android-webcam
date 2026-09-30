@@ -83,11 +83,16 @@ Panel {
   // Start/stop talk to the streaming process itself, not to config. The dot and
   // the button must agree, so both use the same check: the process NAME.
   // Never the -f flag: it matches command-line text, and the shell running the
-  // check is itself a process containing those words, so it always reports
-  // "streaming" no matter what is actually running.
-  Process {
-    id: statusProc
-    command: ["bash", "-c", "pgrep -x scrcpy >/dev/null && echo on || echo off"]
+    // check is itself a process containing those words, so it always reports
+    // "streaming" no matter what is actually running.
+    //
+    // `pgrep -x scrcpy` cannot tell the WEBCAM from the screen mirror - both
+    // are the same executable - so the dot could read "streaming" while the
+    // phone was mirroring the desktop. `android-webcam is-streaming` asks the
+    // app, which reads /proc/<pid>/cmdline and requires --v4l2-sink.
+    Process {
+      id: statusProc
+      command: ["android-webcam", "is-streaming"]
     stdout: StdioCollector { onStreamFinished: root.streaming = (text.trim() === "on"); }
   }
   property bool streaming: false
@@ -105,7 +110,7 @@ Panel {
   Process {
     id: toggleProc
     command: ["bash", "-c",
-      "if pgrep -x scrcpy >/dev/null; then pkill -x scrcpy; echo stopped; " +
+      "if android-webcam is-streaming | grep -q on; then pkill -x scrcpy; echo stopped; " +
       "else setsid -f android-webcam --no-window; echo started; fi"]
   }
 

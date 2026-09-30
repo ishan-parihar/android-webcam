@@ -672,9 +672,22 @@ class App(Adw.Application):
         # Kill any stale scrcpy camera (previous IP, crash, or manual test)
         # Without this, IP hops leave two scrcpys (e.g. .8 and .12) and two
         # sink-inputs — one moves to null sink, the other stays on HDMI (echo).
+        #
+        # -x (exact name) and not -f, deliberately. -f matches the FULL command
+        # line, so it kills this app's own caller as well as anything else that
+        # merely mentions the pattern: an editor with the file open, a terminal
+        # running `tail -f scrcpy.log`, a grep. My earlier note that "-f is safe
+        # here" only covered the immediate caller, and the real blast radius is
+        # every process on the machine whose cmdline contains those words -
+        # including the user's own work.
+        #
+        # -x cannot be selective between two scrcpy processes, so the camera
+        # check is done first: if the only scrcpy running is a screen-mirror
+        # session, this leaves it alone instead of killing the desktop mirror.
         try:
-            subprocess.run(["pkill","-f","scrcpy.*camera.*v4l2-sink"], capture_output=True, timeout=3)
-            time.sleep(0.6)
+            if _scrcpy_is_camera():
+                subprocess.run(["pkill","-x","scrcpy"], capture_output=True, timeout=3)
+                time.sleep(0.6)
         except Exception: pass
         # If a separate audio-only session is already up, it owns the phone mic;
         # asking for audio here too would open the microphone twice.
@@ -943,6 +956,15 @@ def main():
     # never do.
     if len(sys.argv) > 1 and sys.argv[1] == "set":
         return set_cmd(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "is-streaming":
+        # The bar's dot reads this. It is a verb rather than an inline python
+        # one-liner in QML because the QML cannot know where the package lives,
+        # and because pgrep -x cannot tell the WEBCAM from the screen mirror -
+        # both are the same executable. This reads /proc/<pid>/cmdline and
+        # requires --v4l2-sink, which only the webcam carries.
+        from .backend import scrcpy_is_camera
+        print("on" if scrcpy_is_camera() else "off")
+        return 0
     # CLI passthrough: android-webcam --front --720 etc without GUI
     if any(a in sys.argv for a in ("--help","-h","--dry-run","--front","--back","--720","--1080","--torch","--with-audio","--no-window","--with-preview")) and "--gui" not in sys.argv:
         # if any CLI flag, run headless backend.cli instead of GUI — unless --gui forced

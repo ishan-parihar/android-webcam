@@ -23,11 +23,18 @@ Panel {
     //
     // `pgrep -f 'scrcpy.*camera.*v4l2-sink'` was always true from inside this
     // shell: -f matches the whole command line, and the shell running the check
-    // is itself a process whose command line contains those words. Measured on
-    // the installed build with NO scrcpy alive (confirmed by comparing every
-    // /proc/<pid>/exe): the bar showed a filled "streaming" dot anyway. `pgrep
-    // -x scrcpy` matches the process NAME, which no shell can fake.
-    command: ["bash","-c","pgrep -x scrcpy >/dev/null && echo on || echo off"]
+      // is itself a process whose command line contains those words. Measured on
+      // the installed build with NO scrcpy alive (confirmed by comparing every
+      // /proc/<pid>/exe): the bar showed a filled "streaming" dot anyway.
+      //
+      // `pgrep -x scrcpy` fixed the self-match, but it cannot tell the WEBCAM
+      // from the screen mirror - both are the same executable, so the dot read
+      // "streaming" while the phone was mirroring the desktop. `android-webcam
+      // is-streaming` asks the app's own code, which reads /proc/<pid>/cmdline
+      // and requires --v4l2-sink (only the webcam carries it). It is invoked
+      // directly rather than through a shell so the pattern never appears in a
+      // command line that a -f match could pick up.
+      command: ["android-webcam", "is-streaming"]
     stdout: StdioCollector { onStreamFinished: root.streaming = (text.trim() === "on"); /* also parse config for label */ }
   }
   Timer { interval: 3000; running: true; repeat: true; triggeredOnStart: true; onTriggered: if (!statusProc.running) statusProc.running = true }
@@ -117,14 +124,16 @@ Panel {
               // the panel then displayed settings that were not in use. State
               // that is not recorded is state the next surface cannot show.
               MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
-                presetProc.args = ["camera_facing", "front", "resolution", "720p"]
+                presetProc.args = ["camera_facing", "front", "resolution", "720p",
+                                   "torch", "off", "mic_to_host", "off"]
                 presetProc.running = true
               } }
         }
         Rectangle { width: (parent.width-8)/2; height: 32; radius: Style.cornerRadius; color: Util.alpha(root.foreground,0.06)
           Text { text: "Back 1080p"; color: root.foreground; font.family: root.fontFamily; anchors.centerIn: parent }
               MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
-                presetProc.args = ["camera_facing", "back", "resolution", "1080p"]
+                presetProc.args = ["camera_facing", "back", "resolution", "1080p",
+                                   "torch", "off", "mic_to_host", "off"]
                 presetProc.running = true
               } }
         }

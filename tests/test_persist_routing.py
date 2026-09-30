@@ -55,8 +55,8 @@ check("persist() calls update(**changed)",
 save_call = re.search(r"save\(", persist_src)
 check("persist() does not call save()",
       save_call is None,
-      f"still writes the whole dict itself at offset {save_call.start()}"
-      if save_call else "")
+      detail=(f"still writes the whole dict itself at offset {save_call.start()}"
+              if save_call else ""))
 check("persist() does not re-read the file itself",
       "load()" not in persist_src,
       "a bare load() here is the second read-modify-write the guard was for")
@@ -78,6 +78,56 @@ check("backend.py routes its endpoint writes through update()",
 check("config.save() refuses to run rather than writing a stale snapshot",
       "NotImplementedError" in (REPO / "src/android_webcam/config.py").read_text(),
       "save() still writes a whole dict from a snapshot")
+
+# --- the camera/mirror discriminator, behaviourally -----------------------
+# pgrep -x scrcpy matches the NAME, and the screen-mirror session is the same
+# executable, so a name-only check reports "streaming" while the phone is
+# mirroring the desktop. The dot must be able to tell them apart. Driven with
+# /proc synthesised, so this exercises the actual discriminator rather than
+# asserting on source text - which has fooled this session three times.
+import pathlib as _pl  # noqa: E402
+from android_webcam import backend as _b  # noqa: E402
+
+_real_iterdir = _pl.Path.iterdir
+
+
+def _fake_proc(name, comm, cmdline):
+    class _E:
+        def __init__(self):
+            self.name = name
+
+        def __truediv__(self, part):
+            p = _pl.Path(f"/tmp/_fp_{name}_{part}")
+            if part == "comm":
+                p.write_text(comm if isinstance(comm, str) else comm.decode())
+            else:
+                p.write_bytes(cmdline)
+            return p
+    return _E()
+
+
+def _detect(comm, cmdline):
+    _pl.Path.iterdir = lambda self: iter([_fake_proc("999", comm, cmdline)])
+    try:
+        return _b.scrcpy_is_camera()
+    finally:
+        _pl.Path.iterdir = _real_iterdir
+
+
+for label, comm, cmd, want in (
+    ("webcam (--v4l2-sink=/dev/video0)", b"scrcpy",
+     b"scrcpy\x00--v4l2-sink=/dev/video0\x00", True),
+    ("webcam (--v4l2-sink as a split arg)", b"scrcpy",
+     b"scrcpy\x00--v4l2-sink\x00/dev/video0\x00", True),
+    ("screen mirror (no v4l2 sink)", b"scrcpy",
+     b"scrcpy\x00--display-id=0\x00", False),
+    ("a shell merely mentioning scrcpy", b"bash",
+     b"bash\x00-c\x00pgrep -x scrcpy\x00", False),
+    ("an unrelated process", b"firefox", b"firefox\x00scrcpy\x00", False),
+):
+    check(f"camera detection: {label}",
+          _detect(comm, cmd) is want,
+          f"returned {_detect(comm, cmd)}, expected {want}")
 
 # --- behavioural: drive the real arithmetic ------------------------------
 class tmpcfg:
@@ -194,20 +244,22 @@ check("concurrent update() calls do not lose a write", lost == 0,
       f"lost an update in {lost}/{TRIALS} trials - the lock is not covering the "
       f"whole read-modify-write")
 
-# The above is the load-bearing half: with the flock removed it loses
-# 151-200 of 200 across five independent runs, and 0/200 with the lock in place.
-# It is kept because that is the property the lock exists for.
+# The above is the load-bearing half. Five clean runs of 200 trials, faithful
+# unlock (only the flock lines removed, the re-read still inside the try):
 #
-# An earlier version of this comment claimed the opposite - that the race did
-# not reproduce here (0/200 with the flock removed). That number came from a
-# broken injection: deleting the two flock lines left `finally:` with an empty
-# body, so the module raised IndentationError on import and the probe never ran
-# unlocked code at all. The 0/200 was measuring nothing.
+#   unlocked:  151/200  177/200  197/200  194/200  198/200 lost
+#   locked:      0/200 lost
 #
-# The second check pins that the lock is actually TAKEN, which is the property
-# that was previously unverified: a writer holding config.lock must block
-# update() for as long as it holds it. Removing the flock makes it return in
-# ~0.001s instead of waiting out the hold.
+# An earlier note here claimed the race did NOT reproduce, citing 0/200 with the
+# flock removed. That run did compile and did execute unlocked code, so the
+# reason it lost nothing is not established - the likeliest explanation is that
+# the machine was loaded enough that the three writers serialised by accident.
+# Treat the five-run distribution as the measurement and the 0/200 as a single
+# unexplained outlier; do not re-derive a conclusion from it.
+#
+# The second check pins that the lock is actually TAKEN: a writer holding
+# config.lock must block update() for as long as it holds it. Removing the flock
+# makes it return in ~0.001s instead of waiting out the hold.
 import time  # noqa: E402
 
 with tmpcfg():

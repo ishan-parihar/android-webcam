@@ -114,9 +114,24 @@ with tmpcfg():
           "without setsid the stream dies with the shell")
 
     panel_text = PANEL.read_text()
+    # the bar's own stopProc stops every scrcpy, so the "bar and panel agree"
+    # check is about the start command only.
     check("bar and panel both start via setsid + --no-window",
           any("setsid" in e for e in re.findall(r'command:\s*\[[^\]]*\]', panel_text)),
           "the panel and the bar disagree on how to start the stream")
+
+    # ---------- the dot must tell the webcam from the screen mirror ---------
+    # `pgrep -x scrcpy` matches the NAME, and the screen-mirror session is the
+    # same executable - so the dot read "streaming" while the phone was
+    # mirroring the desktop. Both surfaces must ask the app, which checks
+    # /proc/<pid>/cmdline for --v4l2-sink.
+    for path in (PANEL, REPO / "omarchy-plugin/BarWidget.qml"):
+        text = path.read_text()
+        execs = re.findall(r'command:\s*\[[^\]]*\]', text)
+        check(f"{path.name} asks the app, not pgrep, whether a camera is running",
+              any("is-streaming" in e for e in execs)
+              and not any("pgrep" in e for e in execs),
+              "pgrep -x cannot distinguish the webcam from the screen mirror")
 
     # ---------- every control the panel offers is a real config key ----------
     cfgmod.update(android_ip="192.168.1.4", android_port=5555, torch=False,
@@ -202,8 +217,9 @@ with tmpcfg():
           not any("pgrep -f" in e or "pkill -f" in e for e in execs),
           f"a -f pattern matches the shell running it: "
           f"{[e for e in execs if '-f' in e]}")
-    check("the panel's status check matches the process name",
-          any("pgrep -x scrcpy" in e for e in execs), "expected pgrep -x scrcpy")
+    check("the panel asks the app whether a camera is running",
+          any("is-streaming" in e for e in execs),
+          "the dot must distinguish the webcam from the screen mirror")
 
     # ---------- Start must not open a GTK window, and must survive the panel --
     check("Start passes a flag that routes to the headless backend",
