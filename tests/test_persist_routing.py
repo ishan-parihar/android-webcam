@@ -194,5 +194,45 @@ check("concurrent update() calls do not lose a write", lost == 0,
       f"lost an update in {lost}/{TRIALS} trials - the lock is not covering the "
       f"whole read-modify-write")
 
+# The above is a SMOKE test, not a regression test: it passes on an unlocked
+# implementation on this machine (measured: 0/200 lost with the flock removed),
+# because the window is sub-millisecond and the GIL hides it. What can be
+# demonstrated is that the lock is actually HELD - a writer holding config.lock
+# must block update() for as long as it holds it. That is the claim worth
+# pinning; the lost-update check only guards against a future change that makes
+# the window much wider.
+import time  # noqa: E402
+
+with tmpcfg():
+    cfgmod.update(torch=True)
+    lock = cfgmod.CONFIG_DIR / "config.lock"
+    check("the lockfile lives beside the config it guards", lock.exists(),
+          f"expected {lock}")
+
+    holder_fh = []
+    def hold():
+        fh = open(str(lock), "w")
+        import fcntl as _f
+        _f.flock(fh, _f.LOCK_EX)
+        holder_fh.append(fh)
+        time.sleep(0.5)
+        _f.flock(fh, _f.LOCK_UN)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    time.sleep(0.1)                 # let the holder take the lock first
+    started = time.monotonic()
+    cfgmod.update(mic_to_host=True)
+    waited = time.monotonic() - started
+    t.join()
+
+    check("update() blocks while another writer holds the lock", waited > 0.25,
+          f"update() returned in {waited:.3f}s - the lock is not being taken, "
+          f"so the read-modify-write is unprotected")
+    check("the value written after the block still landed",
+          cfgmod.load()["mic_to_host"] is True, "")
+    for fh in holder_fh:
+        fh.close()
+
 print(f"\n{'FAILED' if failures else 'PASSED'}: {failures} failed")
 sys.exit(1 if failures else 0)

@@ -131,19 +131,26 @@ Panel {
         Rectangle { width: (parent.width-8)/2; height: 32; radius: Style.cornerRadius; color: Util.alpha(root.foreground,0.06)
           Text { text: "Back + Torch"; color: root.foreground; font.family: root.fontFamily; anchors.centerIn: parent }
               MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
-                presetProc.args = ["camera_facing", "back", "resolution", "720p", "torch", "on"]
+                presetProc.args = ["camera_facing", "back", "resolution", "720p",
+                                   "torch", "on", "mic_to_host", "off"]
                 presetProc.running = true
               } }
         }
         Rectangle { width: (parent.width-8)/2; height: 32; radius: Style.cornerRadius; color: Util.alpha("#ff6b35",0.12)
-          Text { text: "Mic ON (echo risk)"; color: "#ff6b35"; font.family: root.fontFamily; anchors.centerIn: parent }
+          Text { text: "Mic ON"; color: root.foreground; font.family: root.fontFamily; anchors.centerIn: parent }
               MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
-                presetProc.args = ["camera_facing", "back", "resolution", "720p", "mic_to_host", "on"]
+                // torch off, explicitly. Without it "Back + Torch" leaves the
+                // torch lit for every later start, because a preset that sets
+                // only what it changes inherits everything else - so the torch
+                // would silently follow you into this preset and every start
+                // after it.
+                presetProc.args = ["camera_facing", "back", "resolution", "720p",
+                                   "torch", "off", "mic_to_host", "on"]
                 presetProc.running = true
               } }
         }
       }
-      Text { text: "Mic via --audio-source=mic → PulseAudio 'scrcpy'. Lower speakers or use headphones."; color: Qt.darker(root.foreground,1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; wrapMode: Text.Wrap; width: parent.width }
+      Text { text: "Mic ON routes the phone mic through a null sink, so it does not play through your speakers."; color: Qt.darker(root.foreground,1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; wrapMode: Text.Wrap; width: parent.width }
       Text { text: "Keys: SUPER+SHIFT+W (webcam), SUPER+SHIFT+A (screen), I alias. Test at webcamtests.com while streaming."; color: Qt.darker(root.foreground,1.5); font.family: root.fontFamily; font.pixelSize: Style.font.caption; wrapMode: Text.Wrap; width: parent.width }
     }
   }

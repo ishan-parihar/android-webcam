@@ -95,17 +95,17 @@ def update(**changes) -> dict:
     unknown = set(changes) - set(DEFAULTS)
     if unknown:
         raise KeyError(f"unknown config key(s): {', '.join(sorted(unknown))}")
-    cfg = load()
-    cfg.update(changes)
+    cfg: dict = {}
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(str(CONFIG_DIR / "config.lock"), "w") as lk:
         # Blocking, with a ceiling. A writer that never exits would otherwise
         # wedge every settings change, including the phone's own endpoint push.
         fcntl.flock(lk, fcntl.LOCK_EX)
         try:
-            # Re-read INSIDE the lock. The load above happened before it was
-            # taken, so a concurrent writer may have committed in between; that
-            # snapshot is stale and merging onto it is the lost update.
+            # Load HERE, inside the lock, and nowhere else. A read taken before
+            # the lock is acquired can already be stale: another writer may
+            # commit in between, and merging onto that snapshot is the lost
+            # update the lock exists to prevent.
             cfg = load()
             cfg.update(changes)
             fd, tmp = tempfile.mkstemp(dir=str(CONFIG_DIR), suffix=".tmp")
