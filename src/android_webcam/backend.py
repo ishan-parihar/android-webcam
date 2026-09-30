@@ -155,9 +155,11 @@ def build_argv(cfg: dict, extra: list | None = None,
     build_video_argv / build_audio_argv are the separable halves; this is
     their union in the original order.
 
-    Phone mic is routed to a null sink (scrcpy_mic) via PULSE_SINK env in
-    start(), so it never hits HDMI speakers.  The null sink's monitor
-    (scrcpy_mic.monitor) becomes the system mic.
+    Phone mic is routed to a null sink named scrcpy_mic so it never reaches the
+    HDMI speakers; that sink's monitor (scrcpy_mic.monitor) is what gets
+    promoted to the system mic. See set_phone_as_system_mic for the measured
+    evidence that the monitor, and not the scrcpy node itself, is the node that
+    carries the signal.
 
     audio_owned: set when a separate audio-only scrcpy session is already
     running and therefore already holds the phone microphone. Measured reason:

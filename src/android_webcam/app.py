@@ -239,10 +239,20 @@ class App(Adw.Application):
 
         # The mic is its OWN session, not a side effect of the webcam. Separate
         # button because "use the phone as a microphone" is a standalone want:
-        # you may want the mic with no webcam, or keep the webcam running and
-        # stop the mic. Requires no /dev/videoN.
+        # you may want the mic with NO webcam at all.
+        #
+        # It is disabled while a webcam session runs, and that is deliberate: the
+        # webcam session already carries the phone mic (build_argv includes the
+        # audio flags), and the camera plus microphone are ONE capture resource on
+        # the phone. A second audio session opened the mic twice and the system mic
+        # carried the phone mic summed with itself - measured +15.3 dB. A button
+        # that silently doubles the level and comb-filters the result is worse than
+        # a visibly inactive one, so the precondition is shown, not just toasted.
         self.audio_btn = Gtk.Button(label="Start mic only (no webcam)")
         self.audio_btn.add_css_class("suggested-action"); self.audio_btn.set_hexpand(True)
+        self.audio_btn.set_tooltip_text(
+            "Stream only the phone microphone, with the webcam off. "
+            "Unavailable while the webcam is streaming - it already carries the mic.")
         self.audio_btn.connect("clicked", self.on_mic_start_stop)
         box.append(self.audio_btn)
 
@@ -752,16 +762,34 @@ class App(Adw.Application):
                 logging.warning("rotator start failed: %s", e)
         self.toast(f"Started {self.cfg['camera_facing']} {self.cfg.get('custom_size') or SIZES[self.cfg['resolution']]} → {self.cfg['v4l2_sink']}")
         logging.info("scrcpy launched, pid=%s argv=%s", self.proc.pid, " ".join(argv))
+        # The webcam session now holds the phone mic, so the mic-only button
+        # must become inactive. Without this the button stayed clickable after
+        # Start and the click only died on a toast.
+        self.refresh_status()
 
     def refresh_status(self):
-        """Reflect the two independent sessions in the mic button. Idempotent:
-        both start and stop paths call it, and it must never raise."""
+        """Reflect the two sessions in the mic button. Idempotent: both start
+        and stop paths call it, and it must never raise.
+
+        The button is disabled whenever a webcam session is alive, because that
+        session already carries the phone mic and a second audio session would
+        open the microphone twice (measured +15.3 dB of summed audio). Showing
+        the precondition is better than toasting the reason after a dead click.
+        """
         try:
             if self.audio_btn is None:
                 return
             running = bool(self.audio_proc and self.audio_proc.poll() is None)
-            self.audio_btn.set_label("Stop mic" if running
-                                     else "Start mic only (no webcam)")
+            video_live = bool(self.proc and self.proc.poll() is None)
+            if running:
+                self.audio_btn.set_label("Stop mic")
+                self.audio_btn.set_sensitive(True)
+            elif video_live:
+                self.audio_btn.set_label("Mic already streaming with webcam")
+                self.audio_btn.set_sensitive(False)
+            else:
+                self.audio_btn.set_label("Start mic only (no webcam)")
+                self.audio_btn.set_sensitive(True)
         except Exception as e:
             logging.warning("refresh_status failed: %s", e)
 
