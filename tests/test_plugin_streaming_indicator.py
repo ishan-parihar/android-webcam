@@ -2,7 +2,7 @@
 
 Measured 17:55 on the INSTALLED plugin: with no scrcpy process alive at all -
 confirmed by walking /proc and comparing each /proc/<pid>/exe - the widget
-reported "on". The cause is `pgrep -f 'scrcpy.*camera.*v4l2-sink'`.
+reported "on". The cause was `pgrep -f 'scrcpy.*camera.*v4l2-sink'`.
 
 `-f` matches the whole command line, and the shell that RUNS the check is itself
 a process whose command line contains those words. So the check is true inside
@@ -10,19 +10,19 @@ any script, terminal or test that mentions scrcpy. That is not a contrived
 decoy: it is the widget's own polling loop, which lives inside a shell running
 a command containing the pattern.
 
-Two decoys were tried and both failed before this one, which is worth keeping in
-the record because the first two passed for the wrong reason:
-  - `sh -c 'sleep 20 # words'`   - a comment is not in argv, so pgrep never saw it
-  - `sh -c 'sleep 20' 'words'`   - sh collapses its own argv, so the trailing
-                                  argument never appeared in ps output either
+This test runs the command AS SHIPPED - it is extracted from the QML with a
+regex, not retyped here. An earlier version reimplemented the check in Python
+(over `pgrep -f v4l2` plus a /proc/<pid>/exe scan) and passed while the shipped
+command was still the broken one: two different mechanisms, so the test proved
+nothing about the file it claimed to guard. Reimplementing the thing under test
+is how a suite ends up green on a broken command.
 
-The fix resolves each candidate's executable instead of trusting its text, so
-only a real scrcpy binary counts. Both directions are asserted: a check that can
-only ever say "off" would look identical to a working fix until someone actually
-starts a stream.
+Both directions are asserted, because a check that can only say "off" would
+look identical to a working fix until someone actually starts a stream.
 """
-import os
 import pathlib
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,20 +31,20 @@ HOME = pathlib.Path.home()
 PLUGIN = HOME / ".config/omarchy/plugins/ishanp.android-webcam/BarWidget.qml"
 SRC = pathlib.Path(__file__).resolve().parents[1] / "omarchy-plugin/BarWidget.qml"
 
-OLD_PATTERN = "scrcpy.*camera.*v4l2-sink"
+# Pulls the shell script out of: command: ["bash","-c","<here>"]
+CMD_RE = re.compile(r'id:\s*statusProc.*?command:\s*\["bash","-c","([^"]+)"\]', re.S)
 
-# A stand-in binary named "scrcpy", so the positive control exercises the same
-# exe-resolution path a real stream would.
-#
-# It has to BE a real compiled process, not a shell script. A shell wrapper
-# with `exec -a` replaces its own image, so /proc/<pid>/exe pointed at sleep
-# and the exe check could never pass - the test was wrong, not the fix. Real
-# scrcpy is a native binary whose exe genuinely is scrcpy, so compile a copy of
-# /bin/sleep under that name. The exe basename then matches, and the argv
-# carries the v4l2 words so pgrep can find it.
+# A stand-in named "scrcpy". It must be a real native binary, not a shell
+# script: `pgrep -x` matches comm, which the kernel derives from the executable
+# image, and a `#!/bin/sh` wrapper reports dash as its image. Two earlier
+# stand-ins passed for the wrong reason and both are worth remembering:
+#   - a comment carrying the words, which is not in argv
+#   - `exec -a`, which REPLACES the image, so /proc/pid/exe became sleep
+# A plain copy of /bin/sleep under the name scrcpy has comm "scrcpy" and needs
+# no argv trickery at all.
 BIN_DIR = pathlib.Path(tempfile.mkdtemp())
 FAKE_BIN = BIN_DIR / "scrcpy"
-FAKE_BIN.write_bytes(pathlib.Path("/bin/sleep").read_bytes())
+shutil.copy("/bin/sleep", FAKE_BIN)
 FAKE_BIN.chmod(0o755)
 
 failures = 0
@@ -57,92 +57,62 @@ def check(name, cond, detail=""):
         failures += 1
 
 
-def old_says_streaming() -> bool:
-    """Exactly the widget's current check, run from a shell naming the words."""
-    script = f"pgrep -f '{OLD_PATTERN}' >/dev/null && echo on || echo off"
-    out = subprocess.run(["/bin/bash", "-c", script],
-                         capture_output=True, text=True).stdout.strip()
-    return out == "on"
+def shipped_status_command(path):
+    """The exact shell script the widget's statusProc runs, or None."""
+    m = CMD_RE.search(path.read_text())
+    return m.group(1) if m else None
 
 
-def new_says_streaming() -> bool:
-    """The proposed fix: only a process that IS scrcpy counts.
-
-    Matches the BASENAME of the resolved executable, not the full path. A
-    full-path compare is wrong for a wrapper: scrcpy is launched through
-    setsid, and a process that execs anything else reports THAT as its exe.
-    The basename survives exec, so `scrcpy` is still scrcpy.
-    """
-    pids = subprocess.run(["pgrep", "-f", "v4l2"],
-                          capture_output=True, text=True).stdout.split()
-    for pid in pids:
-        try:
-            if os.path.basename(os.path.realpath(f"/proc/{pid}/exe")) == FAKE_BIN.name:
-                return True
-        except (OSError, ValueError):
-            pass
-    return False
+def run_shipped(path) -> str:
+    script = shipped_status_command(path)
+    if script is None:
+        return "<no statusProc command found>"
+    return subprocess.run(["/bin/bash", "-c", script],
+                          capture_output=True, text=True).stdout.strip()
 
 
-def pgrep_can_see_a_real_process() -> bool:
-    """The candidate list must be non-empty when something real matches.
-
-    Without this, a check hardcoded to return False would pass the positive
-    control vacuously - the 'always off' failure mode.
-    """
-    proc = subprocess.Popen(["scrcpy --video-source=camera --v4l2-sink=/dev/video0",
-                             "5"], executable=str(FAKE_BIN))
-    try:
-        return subprocess.run(["pgrep", "-f", "v4l2"],
-                              capture_output=True).returncode == 0
-    finally:
-        proc.kill(); proc.wait()
-
-
-# --- negative: nothing is streaming, but the shell names the pattern ---------
-check("old check reports streaming with NO scrcpy running (the 17:55 bug)",
-      old_says_streaming(),
-      "expected pgrep -f to be fooled by the checking shell's own cmdline")
-check("new check correctly reports NOT streaming",
-      not new_says_streaming(),
-      "the exe check claimed a stream that does not exist")
-
-# --- positive: a real scrcpy binary must be detected ------------------------
-# argv[0] carries the v4l2 words so `pgrep -f v4l2` can see it, exactly as a
-# real scrcpy's command line does.
-proc = subprocess.Popen(["scrcpy --video-source=camera --v4l2-sink=/dev/video0",
-                         "30"], executable=str(FAKE_BIN))
-try:
-    check("pgrep -f 'v4l2' can see a genuinely running process",
-          pgrep_can_see_a_real_process(),
-          "candidate list was empty, so the fix could be 'always off'")
-    check("new check reports streaming for a real scrcpy",
-          new_says_streaming(),
-          "exe check missed a genuine stream")
-finally:
-    proc.kill(); proc.wait()
-
-# --- the shipped files must stop using the self-matching pattern -------------
-# Match the EXECUTED command, not any mention: the fix's comment quotes the old
-# pattern on purpose, so a plain substring test would fail on the explanation
-# rather than on the bug.
-BAD_STATUS = 'command: ["bash","-c","pgrep -f'
-BAD_STOP = 'command: ["bash","-c","pkill -f'
+# The negative is the caller's OWN shell: this test's command line names
+# scrcpy, exactly as the widget's polling shell does. A `pgrep -f` pattern
+# therefore matches it. There is no decoy process to construct, and none is
+# needed - this file is the decoy.
 for path, label in ((PLUGIN, "installed"), (SRC, "repo")):
     if not path.exists():
         print(f"skip  {label} BarWidget.qml not at {path}")
         continue
+    script = shipped_status_command(path)
+    if script is None:
+        check(f"{label} ships a parseable statusProc command", False,
+              "regex found no command: [\"bash\",\"-c\",...] on statusProc")
+        continue
+    check(f"{label} status check does not use pgrep -f", "pgrep -f" not in script,
+          f"still greps command-line text: {script}")
+    check(f"{label} reports NOT streaming with no scrcpy alive",
+          run_shipped(path) == "off",
+          f"said {run_shipped(path)!r} with zero scrcpy processes running")
+
+# Positive control: a real process whose name is scrcpy MUST be reported on.
+# Without this, "always off" would pass the negative above vacuously.
+proc = subprocess.Popen([str(FAKE_BIN), "30"])
+try:
+    for path, label in ((PLUGIN, "installed"), (SRC, "repo")):
+        if not path.exists() or shipped_status_command(path) is None:
+            continue
+        check(f"{label} reports streaming for a real scrcpy process",
+              run_shipped(path) == "on",
+              f"said {run_shipped(path)!r} while a live scrcpy was running")
+finally:
+    proc.kill(); proc.wait()
+
+# The stop button shares the hazard: pkill -f could kill the shell running it.
+BAD_STOP = 'command: ["bash","-c","pkill -f'
+for path, label in ((PLUGIN, "installed"), (SRC, "repo")):
+    if not path.exists():
+        continue
     text = path.read_text()
-    check(f"{label} BarWidget.qml status check is not pgrep -f",
-          BAD_STATUS not in text, "status check still greps command-line text")
-    check(f"{label} BarWidget.qml stop check is not pkill -f",
-          BAD_STOP not in text, "stop check could pkill the shell running it")
-    check(f"{label} BarWidget.qml uses -x exactly once each",
-          text.count("pgrep -x scrcpy >/dev/null") == 1
-          and text.count("pkill -x scrcpy ;") == 1,
-          "expected one pgrep -x and one pkill -x, got "
-          f"pgrep={text.count('pgrep -x scrcpy >/dev/null')} "
-          f"pkill={text.count('pkill -x scrcpy ;')}")
+    check(f"{label} stop check is not pkill -f", BAD_STOP not in text,
+          "stopProc could pkill the shell running it, or any editor naming scrcpy")
+    check(f"{label} stop check uses pkill -x", "pkill -x scrcpy" in text,
+          "expected pkill -x scrcpy")
 
 FAKE_BIN.unlink()
 BIN_DIR.rmdir()
