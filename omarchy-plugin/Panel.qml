@@ -212,7 +212,13 @@ Panel {
           foreground: root.foreground
           accent: Color.accent
           fontFamily: root.fontFamily
-          onSelected: function(v) { root.apply("camera_facing", v) }
+          // `changed(string value)`, not `selected` - ButtonGroup has no
+          // `selected` signal, and QML ignores a handler for a signal that
+          // does not exist. With onSelected the control was DEAD: it painted
+          // and responded to the keyboard, and wrote nothing. Every test was
+          // green, because they asserted the component was present and wired,
+          // never that the signal name was real.
+          onChanged: function(v) { root.apply("camera_facing", v) }
         }
       }
 
@@ -227,7 +233,7 @@ Panel {
           foreground: root.foreground
           accent: Color.accent
           fontFamily: root.fontFamily
-          onSelected: function(v) { root.apply("resolution", v) }
+          onChanged: function(v) { root.apply("resolution", v) }
         }
       }
 

@@ -240,6 +240,36 @@ with tmpcfg():
     else:
         print("skip  qs.Ui Toggle.qml not found; cannot verify keyboard support")
 
+    # The decisive check: every on<Signal> handler the panel uses must name a
+    # signal the shell component ACTUALLY declares. QML silently ignores a
+    # handler for a signal that does not exist, so `onSelected` on ButtonGroup
+    # left the facing and resolution controls dead - they painted and took
+    # keyboard input and wrote nothing, with every other test green. Checking
+    # that a component is present is not checking that it is connected.
+    UI = pathlib.Path("/usr/share/omarchy/shell/Ui")
+    shell_signals = {}
+    for comp in ("ButtonGroup", "PanelActionButton", "Toggle"):
+        f = UI / f"{comp}.qml"
+        if f.exists():
+            shell_signals[comp] = set(re.findall(r"signal\s+(\w+)\s*\(",
+                                                  f.read_text()))
+    handlers = re.findall(r"^\s*on(\w+)\s*:\s*function", code, re.M)
+    unknown = []
+    for h in handlers:
+        owner = {"Changed": "ButtonGroup", "Clicked": "PanelActionButton",
+                 "Toggled": "Toggle"}.get(h)
+        # QML signal names are lowerCamel; a handler capitalises the first letter.
+        if owner and shell_signals.get(owner) and h.lower() not in shell_signals[owner]:
+            unknown.append(f"on{h} is not a signal of {owner} "
+                           f"(it has {sorted(shell_signals[owner])})")
+    check("every on<Signal> handler names a signal the shell component declares",
+          not unknown, "; ".join(unknown) or "")
+    check("the panel has signal handlers at all", bool(handlers),
+          "none found - is the panel still wired?")
+    check("no handler is attached to a signal the shell does not declare",
+          "onSelected" not in code,
+          "ButtonGroup has no `selected` signal; the handler is silently ignored")
+
     # Every control must still be wired to a write, not merely present.
     for control in ("torch", "mic_to_host", "with_preview",
                     "camera_facing", "resolution"):
