@@ -987,6 +987,33 @@ public class MainActivity extends Activity {
                 boolean ours = trustFileHasHostKey();
                 Log2.i("trust store has " + keys + " key(s); our host key present=" + ours);
                 if (keys > 0 && ours) {
+                    // The phone's adbd may be listening on the RANDOM port
+                    // Android's wireless debugging picked, or on nothing at all
+                    // if the user toggled it off. Observed 16:28: listening set
+                    // [1739, 1716, 50037, 40353, 5060] with no 5555, so the app
+                    // logged "not advertising: adb port unverified" and the host
+                    // could not reach the phone at all.
+                    //
+                    // The app has root and startAdbd() already pins the port
+                    // with setprop, so a missing or moved adbd is ours to fix -
+                    // the user should never have to open Settings. Try it BEFORE
+                    // advertising, and only when the port is genuinely wrong, so
+                    // a healthy phone is never restarted.
+                    int pinnedPort = actualAdbPort();
+                    if (pinnedPort != ADB_PORT) {
+                        Log2.i("fast path: adbd not on " + ADB_PORT
+                                + " (actualAdbPort=" + (pinnedPort > 0 ? pinnedPort : "none")
+                                + "), re-pinning with setprop");
+                        startAdbd();
+                        // The rebind is asynchronous. Poll briefly, so the
+                        // advertisement below names a port adbd really holds.
+                        for (int i = 0; i < 10 && actualAdbPort() != ADB_PORT; i++) {
+                            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+                        }
+                        pinnedPort = actualAdbPort();
+                        Log2.i("fast path: after re-pin actualAdbPort="
+                                + (pinnedPort > 0 ? pinnedPort : "none"));
+                    }
                     // An already-trusted phone NEVER reaches provision(), so
                     // the AdbDebuggingManager store would never be written and
                     // the USB-debugging prompt would keep coming back on an
@@ -1004,7 +1031,14 @@ public class MainActivity extends Activity {
                         Log2.i("advertising adb on port " + fastPort);
                         advertiseAdb(fastPort);
                     } else {
-                        Log2.i("not advertising: adb port unverified");
+                        // The re-pin above already ran and still failed. Say so
+                        // with the evidence, rather than the bare "unverified",
+                        // so the next reader knows whether the setprop was
+                        // rejected or adbd simply is not listening.
+                        Log2.i("not advertising: adb port unverified after re-pin; "
+                                + "listening=" + listeningPorts()
+                                + " (setprop may be blocked - an OEM kernel can drop "
+                                + "service.adb.tcp.port writes)");
                     }
                     ui.post(() -> done("Ready — your computer can use this phone as a "
                             + "webcam. " + keys + " trusted computer(s)."));
