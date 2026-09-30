@@ -483,6 +483,23 @@ public class MainActivity extends Activity {
         Log2.i("startAdbd rc=[" + r.trim() + "]");
     }
 
+    /**
+     * Pin adbd to ADB_PORT WITHOUT restarting it.
+     *
+     * Restarting is a last resort. If a ROM ignores the property, then
+     * 'setprop; stop adbd; start adbd' on every launch would bounce adbd
+     * forever and never converge - a worse failure than the port sitting on
+     * the wrong number, which still works. So when adbd is already listening
+     * we only setprop and re-verify, and restart only when it is genuinely
+     * absent. Observed 16:28: adbd alive on 1739 while the pinned prop said
+     * 5555, so that is the case that must not restart.
+     */
+    private void setAdbdPortPropOnly() {
+        String r = su("setprop service.adb.tcp.port " + ADB_PORT + "; "
+                    + "setprop persist.adb.tcp.port " + ADB_PORT + ";");
+        Log2.i("setAdbdPortPropOnly rc=[" + r.trim() + "]");
+    }
+
     private boolean adbdListening() {
         for (int p : listeningPorts()) {
             // Narrower than "any high port": an unrelated service on 40xxx
@@ -1001,18 +1018,37 @@ public class MainActivity extends Activity {
                     // a healthy phone is never restarted.
                     int pinnedPort = actualAdbPort();
                     if (pinnedPort != ADB_PORT) {
+                        // Two different faults, two different repairs.
+                        //
+                        //  ADBD ABSENT  - nothing is listening at all (the
+                        //    wireless-debugging toggle is off). Only a restart
+                        //    can bring it up.
+                        //  ADBD MOVED   - it is listening on the random port
+                        //    Android picked. Restarting here would bounce adbd
+                        //    on EVERY launch, and if the ROM ignores the
+                        //    property it would never converge. Setprop and
+                        //    re-verify instead: it costs no restart, and the
+                        //    port still works even if the prop is ignored.
+                        boolean absent = !adbdListening();
                         Log2.i("fast path: adbd not on " + ADB_PORT
                                 + " (actualAdbPort=" + (pinnedPort > 0 ? pinnedPort : "none")
-                                + "), re-pinning with setprop");
-                        startAdbd();
+                                + ", adbdListening=" + (!absent) + ") -> "
+                                + (absent ? "restarting adbd" : "setprop only, no restart"));
+                        if (absent) {
+                            startAdbd();
+                        } else {
+                            setAdbdPortPropOnly();
+                        }
                         // The rebind is asynchronous. Poll briefly, so the
                         // advertisement below names a port adbd really holds.
                         for (int i = 0; i < 10 && actualAdbPort() != ADB_PORT; i++) {
                             try { Thread.sleep(300); } catch (InterruptedException ignored) {}
                         }
                         pinnedPort = actualAdbPort();
-                        Log2.i("fast path: after re-pin actualAdbPort="
-                                + (pinnedPort > 0 ? pinnedPort : "none"));
+                        Log2.i("fast path: after repair actualAdbPort="
+                                + (pinnedPort > 0 ? pinnedPort : "none")
+                                + (pinnedPort == ADB_PORT ? " (converged)"
+                                   : " (prop did not take; adbd still reachable on its own port)"));
                     }
                     // An already-trusted phone NEVER reaches provision(), so
                     // the AdbDebuggingManager store would never be written and
