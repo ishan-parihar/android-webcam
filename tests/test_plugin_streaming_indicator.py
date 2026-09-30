@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 HOME = pathlib.Path.home()
 PLUGIN = HOME / ".config/omarchy/plugins/ishanp.android-webcam/BarWidget.qml"
@@ -185,15 +186,82 @@ for path, label in ((PLUGIN, "installed"), (SRC, "repo")):
     # pkill -x is no longer acceptable either: it matches the NAME, and the
     # screen-mirror session is the same executable, so stopping the webcam would
     # also stop a mirror (android-screen is a real scrcpy wrapper here).
+    # Check the EXECUTED commands, not the file: these files document the old
+    # bug in prose, and "pkill" not in text flags the explanation instead of
+    # the defect. Fourth time in this work that a comment has defeated a
+    # plain-text check.
+    execs = re.findall(r'command:\s*\[[^\]]*\]', text)
     check(f"{label} stop is not a blanket pkill",
-          "pkill" not in "\n".join(re.findall(r'command:\s*\[[^\]]*\]', text)),
-          "expected the `stop` verb, which signals only camera pids")
+          not any("pkill" in e for e in execs),
+          "pkill matches the NAME, which the screen mirror also has - stopping "
+          "the webcam would take a mirror session down with it")
     check(f"{label} stop check uses the camera-scoped verb",
-          '"android-webcam", "stop"' in text or '"android-webcam","stop"' in text,
+          any('"android-webcam", "stop"' in e for e in execs),
           "expected command: [\"android-webcam\", \"stop\"]")
 
 FAKE_BIN.unlink(missing_ok=True)
 FAKE_SRC.unlink(missing_ok=True)
 BIN_DIR.rmdir()
+
+# --- the KILL, not just the detection ------------------------------------
+# Everything above proves the app can RECOGNISE the camera. Nothing proved that
+# stopping it leaves the screen mirror alone - the change that motivated the
+# `stop` verb. So run both for real: two compiled stand-ins, one carrying
+# --v4l2-sink and one not, then stop_camera_stream().
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from android_webcam.backend import scrcpy_camera_pids, stop_camera_stream  # noqa: E402
+
+KILL_DIR = pathlib.Path(tempfile.mkdtemp())
+KILL_BIN = KILL_DIR / "scrcpy"
+(KILL_DIR / "s.c").write_text("#include <unistd.h>\n"
+                              "int main(int c,char**v){sleep(120);return 0;}\n")
+subprocess.run(["cc", "-O0", "-o", str(KILL_BIN), str(KILL_DIR / "s.c")],
+               capture_output=True, text=True)
+
+if not KILL_BIN.exists():
+    print("warn  no compiler; cannot test the kill behaviourally")
+else:
+    KILL_BIN.chmod(0o755)
+    cam = subprocess.Popen([str(KILL_BIN), "--v4l2-sink=/dev/video0"])
+    mir = subprocess.Popen([str(KILL_BIN), "--display-id=0"])
+    try:
+        # Both stand-ins must be ALIVE before the kill, and the camera scan must
+        # name only the camera. Asking the camera scan to report the mirror was
+        # nonsense - it is built to exclude exactly that.
+        for _ in range(50):
+            if cam.poll() is None and mir.poll() is None:
+                break
+            time.sleep(0.1)
+        check("both stand-ins are alive before the kill",
+              cam.poll() is None and mir.poll() is None,
+              f"camera={cam.poll()} mirror={mir.poll()} (neither should be done)")
+        check("the camera scan names the camera and NOT the mirror",
+              scrcpy_camera_pids() == [cam.pid],
+              f"scan saw {sorted(scrcpy_camera_pids())}, expected exactly [{cam.pid}]")
+
+        killed = stop_camera_stream()
+        for _ in range(50):
+            if cam.poll() is not None:
+                break
+            time.sleep(0.1)
+        check("stop_camera_stream signalled exactly the camera",
+              killed == 1, f"returned {killed}, expected 1")
+        check("the CAMERA process died", cam.poll() is not None,
+              f"camera pid {cam.pid} still alive after stop")
+        check("the SCREEN MIRROR survived",
+              mir.poll() is None,
+              f"mirror pid {mir.pid} was killed too - the whole point of the "
+              f"stop verb is that it does not match on process name")
+        check("nothing camera-like remains after the stop",
+              scrcpy_camera_pids() == [],
+              f"still see {scrcpy_camera_pids()}")
+    finally:
+        for p in (cam, mir):
+            if p.poll() is None:
+                p.kill()
+            p.wait()
+    KILL_BIN.unlink()
+    (KILL_DIR / "s.c").unlink()
+    KILL_DIR.rmdir()
 print(f"\n{'FAILED' if failures else 'PASSED'}: {failures} failed")
 sys.exit(1 if failures else 0)
