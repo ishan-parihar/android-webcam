@@ -124,7 +124,7 @@ below, which is the most important thing in this section.
 | Claim | Result | Control that makes it falsifiable |
 |---|---|---|
 | APK builds and installs | **proven** — `android/build.sh` uses bare `javac` and exits 0; the APK was installed from `~/Downloads/android-webcam.apk` and produced this session's device log | build exits non-zero on any syntax error; the device log proves the installed APK ran |
-| app provisions the trust store without a prompt | **NOT PROVEN** — see the note under the table. Two different stores are involved and neither has been observed being written. | none yet |
+| app provisions the trust store without a prompt | **PROVEN 13:43** — `provision wrote=true hook=true listening=true`, host logged `served key to 192.168.1.4`, `adb devices` went `unauthorized` -> `device` | positive: `GET /adbkey.pub -> 200, 715 bytes, valid=true` and the host's own log both attest the same fetch. negative: at 13:21, with the same phone and no firewall rule, the same log shape ended `live on 7911 = []` and 248 SocketTimeouts |
 | `adb_keys` is never truncated | **unverified this session** — the code is append-only with a `grep -qxF` guard and backs up first, but no re-run was done here | `adb_keys.bak` exists; a second run must be a no-op |
 | host key handover needs only one click | **half-proven** — `serve_key` really does bind 192.168.1.13:7911 and answers `GET /adbkey.pub` with HTTP 200 and 715 bytes of key. But the one consumer observed was a local `curl`, not the phone. | `curl http://<host>:7911/adbkey.pub` returns the key while the server is up; the phone's log names port 7911 when the sweep fails |
 | real adb port is learned | **proven on device** — the phone log reports `actualAdbPort=5555 (pinned by getprop) of listening=[5555, 1716, 39829, 50037, 5060]`, i.e. the pinned port was confirmed present in the LISTEN set, and the host connected to 5555 | `actualAdbPort()` returns −1 when the pinned port is absent from the LISTEN set |
@@ -138,10 +138,46 @@ below, which is the most important thing in this section.
 | zero-key bootstrap (empty trust store) | **UNPROVEN — and the earlier claim of proof was wrong** | see below |
 | mic level is usable for speech | **sink-volume fix proven; speech usability NOT ESTABLISHED** — `ensure_null_sink` now forces 100%, and the attenuation it caused is measured: same capture chain, one session, sink as created mean −75.1 dB vs forced to 100% mean −36.1 dB, against a −91.0 dB floor. With the fix in place and no manual intervention the shipped default reads **mean −52.9 dB**. That is the whole evidence. | the floor is `max == mean == −91.0 dB` with scrcpy killed; a fresh sink and a pre-existing 20% sink were both checked to come up at `vol 1.00`. What is NOT shown: anyone speaking. One quiet-room sample cannot separate speech from ambient, so no speech-level claim is made. |
 
-### Trust store: two stores, neither write observed
+### Trust store: PROVEN at 13:43, and how it was nearly missed
 
-There are TWO independent stores, and conflating them produced several wrong
-conclusions tonight:
+The 13:43 log is the first and only run where the phone actually fetched a key:
+
+    trust store has 1 key(s); our host key present=false
+    start discovery; myIp=192.168.1.4 prefix=/24
+    nsd -> 192.168.1.13:7911
+    GET http://192.168.1.13:7911/adbkey.pub -> 200, 715 bytes, valid=true
+    provisioning with key from 192.168.1.13:7911
+    POST /phone ip=192.168.1.4 port=5555 -> 200
+    provision wrote=true hook=true listening=true on port 5555
+
+Host side, independently: the server logged `served key to 192.168.1.4`,
+`adb devices` went from `unauthorized` to `device`, and
+`adb shell echo HANDOVER_WORKS` returned `HANDOVER_WORKS`. Two independent
+observers, same run.
+
+Three separate causes stood between this and working, and the second was
+invisible until the trust gate was fixed:
+
+  1. **ufw dropped the packets.** ENABLED=yes, DEFAULT_INPUT_POLICY=DROP, and
+     no rule for 22 or 7911. Fixed with
+     `sudo ufw allow from 192.168.1.0/24 to any port 7911 proto tcp` and the
+     same for 22. Confirmed against the ENFORCED rules
+     (`^-A ufw-user-input`, not the comment lines).
+  2. **countKeys() let a foreign key fake a trusted phone.** `grep -c .` counts
+     LINES, so a file holding another host's key satisfied `keys > 0`, the fast
+     path at :979 took the "already trusted" branch, and the app advertised
+     readiness while adbd refused us. This is why 13:15 logged `keys=1` and
+     `1/1 present` with the server logging zero requests: **the sweep never
+     ran**. Fixed with trustFileHasHostKey(), an exact `grep -qxF`, gated on
+     `keys > 0 && ours`. See tests/test_trust_store_gate.py.
+  3. **serve_key self-terminated at 600s.** That deadline applied even with
+     once=False, so a phone launching later met a closed port. max_wait=None
+     now waits until Ctrl-C. This is a RUNTIME failure, not an import error:
+     the wait loop compared `float < deadline`, and `float < None` raises after
+     the socket binds while py_compile passes. See
+     tests/test_serve_key_modes.py.
+
+TWO STORES, which conflating them produced several wrong conclusions:
 
   1. `/data/misc/adb/adb_keys` - the FILE adbd reads to authorize a host.
   2. `settings secure authorized_adb_keys` - AdbDebuggingManager's PROMPT list,
@@ -149,58 +185,40 @@ conclusions tonight:
 
 `ensureManagerAuthorizedKey()` only ever touches (2). It reads keys FROM (1) and
 publishes them to (2); it never writes (1). With (1) empty and no
-`pendingHostKey` from the 7911 handover it logs `manager key: no host key
-available; leaving store untouched` and returns - so the app CANNOT repopulate an
-empty store, and it is not what re-added the paired entry.
+`pendingHostKey` it logs `manager key: no host key available; leaving store
+untouched` and returns - so the app CANNOT repopulate an empty store, and it
+is not what re-added the paired entry. The `keys=N` on the launch line is a
+count read from (1).
 
-The `keys=N` on the launch line is a count read from (1). So `keys=1` says the
-FILE is non-empty, and `manager key: 1/1 present` says (2) already matched.
+The empty file is written by `provision()` in the app, confirmed at 13:43 by
+`wrote=true` and by adb going to `device`. The file cannot be verified from the
+host: `su` is KernelSU-scoped to the app, so `su -c grep ... /data/misc/adb`
+returns `su: inaccessible or not found`. The phone's own log line is the
+authority.
 
-PROVEN - the fast path is durable and costs no network. Runs at 12:12 and 12:58
-logged `keys=1`, `manager key: 1/1 present`, then went straight to
-`advertising adb on port 5555` with NO `start discovery`, no `nsd`, no sweep, no
-7911. A key is present, the app does no network work, and adb authorizes.
-
-NOT PROVEN - that this app ever wrote anything. The file went `keys=0` at 11:29
-to `keys=1` at 12:12 with **no app launch in between**, so the app was not
-running when the key appeared. The user also observed a root push on revoke.
-Both point at the platform's own approval writing the file. The empty-store
-handover that must write it has never been observed.
-
-FIVE TRAPS THAT PRODUCED WRONG CONCLUSIONS HERE, all mine:
+SEVEN TRAPS THAT PRODUCED WRONG CONCLUSIONS HERE, all mine:
 
   1. `Log2.resetForNewRun()` TRUNCATES the log every launch. A paste can never
      show an earlier run's fetch, so "not in this log" is NOT evidence it never
-     happened - the inference runs the other way. The 11:29 run was destroyed by
-     the 12:12 launch before it was read.
+     happened - the inference runs the other way.
   2. `serve_key(once=True)` is one-shot and a local `curl` sets `served=1`. My
-     own probe is what made commit `72d40b3` look like proof; that claim was
-     retracted in 647f935.
+     own probe is what made commit 72d40b3 look like proof; retracted in
+     647f935.
   3. Reading `settings get secure authorized_adb_keys` while adb was
      `unauthorized` returned the pairing dialog instead of a value. I read
-     "host key NOT found" out of that and drew a conclusion from a check that
-     had not actually run.
-  4. Claiming the app repopulates the paired-device entry on revoke. It cannot -
-     see the code above. I asserted it to explain a symptom without reading the
-     path, and the user was about to act on it.
-  5. Absolute dB thresholds are not controls; this machine's room mics bleed
-     into every null sink. The valid control is live-vs-dead on one node.
-
-OPEN LEAD, the one actionable thing left. The last failed sweep reported
-`ConnectException=1` against 252 timeouts while the host WAS listening on
-.13:7911. One immediate refusal rather than 253 silent timeouts is a different
-failure shape - firewall, client isolation, or the sweep not trying the host's
-own subnet. It is the difference between the sweep working and not working, and
-it is unresolved.
-
-To settle it in one run:
-  1. `adb devices` must read `unauthorized` first,
-  2. `serve_key` must already be listening on the LAN address, started with
-     `once=False`, and **not curled**,
-  3. open the phone app and let the sweep run,
-  4. paste the log immediately - it rotates on the next launch.
-     It should show a non-empty `live on 7911 = [...]` list, a write to the
-     trust store, and a later launch with `keys=1` and no discovery.
+     "host key NOT found" out of a check that had not run.
+  4. Claiming the app repopulates the paired entry on revoke. It cannot - see
+     the two-store analysis. The user was about to act on it.
+  5. Treating `grep -E '22'` over /etc/ufw/user.rules as the enforced ruleset.
+     Those are ufw's SOURCE file with matching comment lines. The live rules
+     are the `^-A ufw-user-input` entries.
+  6. A 40-char stub in the trust-gate test FAILED its own positive control,
+     which is how the length sensitivity surfaced. It now reads the real
+     ~/.android/adbkey.pub.
+  7. Committing a syntax error. 32904a6 re-indented serve_key and broke
+     backend.py on import, taking the whole host app down. scripts/
+     check-python.sh now gates every commit, and is verified BY FAILURE:
+     re-injecting that exact break exits 1 and names the file.
 
 ### On controls
 

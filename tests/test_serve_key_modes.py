@@ -10,12 +10,15 @@ one that dies on start.
 Runs both modes for real. Loopback and a throwaway port: this asserts the
 lifetime policy, not LAN reachability.
 """
+import pathlib
 import socket
 import sys
 import threading
 import time
 
-sys.path.insert(0, "/home/ishanp/Documents/github/my-projects/android-webcam/src")
+# Relative to this file, so the test works in any clone. An absolute path
+# hardcoded to one machine passes there and ImportErrors everywhere else.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from android_webcam.backend import serve_key  # noqa: E402
 
 HOST = "127.0.0.1"
