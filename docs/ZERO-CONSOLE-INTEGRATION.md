@@ -107,25 +107,50 @@ Already exists (627 lines, GTK4 + Adw). Additions:
 |---|---|---|
 | 1 | Root-provisioning logic, one implementation | **done** — `scripts/adb_provision.sh` (shell path) + identical logic in `MainActivity.java` |
 | 2 | `android/` skeleton that builds an installable APK | **done** — `./build.sh` → signed 17K APK |
-| 3 | Trust-store writer behind a button | **done** — not yet run on a device |
-| 4 | Fixed-port setter | **done** — not yet run on a device |
-| 5 | Boot persistence with framework detection | **done** — not yet run on a device |
-| 6 | Host-side: promote `--pair` + `ensure_connected` to GUI controls | **partial** — logic built and on the start path; the GTK controls are not drawn yet |
+| 3 | Trust-store writer behind a button | **built; earlier session reported it run on device with no pairing prompt. NOT re-verified in this session** — the quoted logcat came from that earlier run |
+| 4 | Fixed-port setter | **built; earlier session reported 5555 from `getprop`. This session independently confirmed the port is live via `adb connect`, not the setter's own logic** |
+| 5 | Boot persistence with framework detection | **UNEXERCISED** — needs a reboot, which is a console step |
+| 6 | Host-side: promote `--pair` + `ensure_connected` to GUI controls | **partial** — logic is on the start path and ran against the live phone; the GTK controls are not drawn yet |
 | 7 | Remove `scripts/*.sh` once the APK is the only entry point | pending — kept deliberately as the no-APK path and for recovery |
 
-## 6. Verification that must happen before calling it done
+## 6. Verification status
 
-Nothing in the phone-side chain has been executed yet — there is no adb device
-and no root on the phone. These are the proofs owed:
+Measured on the real device (Redmi Note 8 Pro, `192.168.1.4:5555`, adb over
+WiFi). Rows say **proven** only when THIS session measured them; rows carried
+over from earlier work are labelled as such and are not counted as evidence.
+Every "proven" figure has a control that can fail — see the note on controls
+below, which is the most important thing in this section.
 
-| Claim | How it is proven |
-|---|---|
-| APK installs and launches | sideload, open, no crash |
-| trust store works | `adb devices -l` lists the device, no pairing screen used |
-| port pinned | `/proc/net/tcp` shows `15B3` in `LISTEN`, survives reboot |
-| survives DHCP change | change the phone's IP, press start, still connects |
-| survives auto-off | toggle wireless debugging off, press start, still connects |
-| safety | `adb_keys.bak` exists; a second run is a no-op; key never truncated; hook file lands in the detected framework's dir |
+| Claim | Result | Control that makes it falsifiable |
+|---|---|---|
+| APK builds and installs | **proven earlier, not re-verified here** — `android/build.sh` uses bare `javac`; no Java changed in this session, so no rebuild was needed | build exits non-zero on any syntax error |
+| app provisions the trust store without a prompt | **earlier session, not re-verified here** — the logcat lines quoted below were captured then, not in this session. The only device fact observed here is that `adb connect 192.168.1.4:5555` succeeds, which proves the PORT, not the writer. | re-run `ensureManagerAuthorizedKey()`, key count must not grow; the app's own log prints `keys=N` |
+| `adb_keys` is never truncated | **earlier session, not re-verified here** — code is append-only and backs up first; not re-measured now | `adb_keys.bak` exists; a second run is a no-op |
+| real adb port is learned | **proven** — `adb connect 192.168.1.4:5555` succeeded and `adb devices` lists it, which is only possible if the port is live on the device. `actualAdbPort()` returns −1 when the prop and the `/proc/net/tcp` LISTEN set disagree. | the connection itself is the control: a wrong port cannot connect |
+| webcam delivers live video | **proven** — 3 grabs 3s apart, 3 distinct md5s (337269/334586/347891 B) | after killing scrcpy the grab is 0 B; a retained still would still hash |
+| phone mic reaches applications | **proven as delivery** — recording the literal `default` node: live mean −79.9 dB, dead mean −91.0 dB with `max == mean` (+12.2 dB) | dead run is true digital silence; a check that cannot read −91.0 measures nothing |
+| webcam and mic run together | **proven** — one session, `scrcpy --video-source=camera --audio-source=mic`, both streams non-empty | the webcam's 3-distinct-md5 liveness and the mic's live/dead pair are measured in the SAME run |
+| mic and webcam toggle independently | **proven** — `_stop_proc` contains 0 audio references, so the rotation watcher cannot kill the mic | `audio_proc` initialised in `__init__`; `_stop_audio_proc()` on a fresh object is a clean no-op |
+| `mic_to_phone` sends host audio to the phone | **RETRACTED — does not exist** | `scrcpy --help`: `--audio-dup` is "capture and keep playing on the device" and is only valid with `--audio-source=playback`. scrcpy has no host→phone audio path. |
+| phone playback capture carries signal | **UNEXERCISED** — the path starts and registers a source, but no audio was playing on the phone during the test, so the −91.0 dB reading is a NULL result, not a pass or a fail | needs audio playing on the phone |
+| zero-key bootstrap (empty trust store) | **UNEXERCISED** — unreachable without root the host does not have | `pm clear` does not empty `/data/misc/adb/adb_keys`, so the fast path always wins. The only route is revoking USB-debugging authorization on the phone, which reintroduces the prompt this work removed. |
+| mic level is usable for speech | **NOT ESTABLISHED** — delivery is proven, level is not. Live mean −79.9 dB against a −91.0 dB floor is only ~12 dB of signal, which is far below a comfortable speech level. Measured while the room was quiet; phone-side `dumpsys audio` shows some inputs `Muted: true`. | needs the phone at a known distance with speech playing |
+
+### On controls
+
+Three controls in this project are invalid and were withdrawn after
+measurement, recorded here so they are not re-used:
+
+1. **Absolute dB thresholds are not controls.** This machine's room and
+   headset microphones bleed into every null-sink monitor, so two unrelated
+   monitor nodes both read around −50 to −79 dB. A "control monitor" proves
+   nothing. The valid control is **live vs dead on the same node with scrcpy
+   killed**, which yields a true floor: `max_volume == mean_volume == −91.0 dB`.
+2. **File size is not an assertion for `pw-cat`.** It always emits a header;
+   the no-session control still wrote 318 KB.
+3. **A single case is not a matrix.** The 512-case argv matrix caught a
+   misplaced `extra` that one case would have passed.
+
 
 ## 7. Non-goals
 
