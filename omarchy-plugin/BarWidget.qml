@@ -17,7 +17,15 @@ Panel {
 
   Process {
     id: statusProc
-    command: ["bash","-c","pgrep -f 'scrcpy.*camera.*v4l2-sink' >/dev/null && echo on || echo off"]
+    // Resolve the process NAME, never match command-line text.
+    //
+    // `pgrep -f 'scrcpy.*camera.*v4l2-sink'` was always true from inside this
+    // shell: -f matches the whole command line, and the shell running the check
+    // is itself a process whose command line contains those words. Measured on
+    // the installed build with NO scrcpy alive (confirmed by comparing every
+    // /proc/<pid>/exe): the bar showed a filled "streaming" dot anyway. `pgrep
+    // -x scrcpy` matches the process NAME, which no shell can fake.
+    command: ["bash","-c","pgrep -x scrcpy >/dev/null && echo on || echo off"]
     stdout: StdioCollector { onStreamFinished: root.streaming = (text.trim() === "on"); /* also parse config for label */ }
   }
   Timer { interval: 3000; running: true; repeat: true; triggeredOnStart: true; onTriggered: if (!statusProc.running) statusProc.running = true }
@@ -26,7 +34,10 @@ Panel {
   // process group.  When Quickshell restarts (monitor change, theme reload,
   // etc.) the webcam must keep running, so we can't be a child of QML.
   Process { id: launchProc; command: ["setsid","-f","android-webcam"] }
-  Process { id: stopProc; command: ["bash","-c","pkill -f 'scrcpy.*camera.*v4l2-sink' ; echo stopped"] ; stdout: StdioCollector { onStreamFinished: statusProc.running = true } }
+  // Same self-match hazard as statusProc: `pkill -f` would match the shell
+  // running it, so this could kill its own caller - or any terminal or editor
+  // whose command line mentions scrcpy. `pkill -x` matches the name only.
+  Process { id: stopProc; command: ["bash","-c","pkill -x scrcpy ; echo stopped"] ; stdout: StdioCollector { onStreamFinished: statusProc.running = true } }
 
   BarIconButton {
     id: button
