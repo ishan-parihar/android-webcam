@@ -55,11 +55,9 @@ class App(Adw.Application):
         wrong: the phone's push makes the port look "changed" and would be
         written straight back.
         """
-        fresh = load()
         changed = {k: v for k, v in self.cfg.items() if self._baseline.get(k) != v}
         changed.update(changes)
-        fresh.update(changed)
-        save(fresh)
+        fresh = update(**changed)
         # Adopt the ENDPOINT the phone pushed, in memory as well as on disk.
         # Adopting only `changed` left self.cfg holding the pre-push port while
         # _baseline moved to the real one, so the next settings change saw a
