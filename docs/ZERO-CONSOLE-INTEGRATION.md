@@ -124,7 +124,7 @@ below, which is the most important thing in this section.
 | Claim | Result | Control that makes it falsifiable |
 |---|---|---|
 | APK builds and installs | **proven** — `android/build.sh` uses bare `javac` and exits 0; the APK was installed from `~/Downloads/android-webcam.apk` and produced this session's device log | build exits non-zero on any syntax error; the device log proves the installed APK ran |
-| app provisions the trust store without a prompt | **authorization observed, mechanism UNPROVEN** — see the note under the table. The writer has never been seen to run. | none yet: the fetch must appear in the phone log with a non-zero `keys=` on a later launch |
+| app provisions the trust store without a prompt | **NOT PROVEN** — see the note under the table. Two different stores are involved and neither has been observed being written. | none yet |
 | `adb_keys` is never truncated | **unverified this session** — the code is append-only with a `grep -qxF` guard and backs up first, but no re-run was done here | `adb_keys.bak` exists; a second run must be a no-op |
 | host key handover needs only one click | **half-proven** — `serve_key` really does bind 192.168.1.13:7911 and answers `GET /adbkey.pub` with HTTP 200 and 715 bytes of key. But the one consumer observed was a local `curl`, not the phone. | `curl http://<host>:7911/adbkey.pub` returns the key while the server is up; the phone's log names port 7911 when the sweep fails |
 | real adb port is learned | **proven on device** — the phone log reports `actualAdbPort=5555 (pinned by getprop) of listening=[5555, 1716, 39829, 50037, 5060]`, i.e. the pinned port was confirmed present in the LISTEN set, and the host connected to 5555 | `actualAdbPort()` returns −1 when the pinned port is absent from the LISTEN set |
@@ -138,54 +138,70 @@ below, which is the most important thing in this section.
 | zero-key bootstrap (empty trust store) | **UNPROVEN — and the earlier claim of proof was wrong** | see below |
 | mic level is usable for speech | **sink-volume fix proven; speech usability NOT ESTABLISHED** — `ensure_null_sink` now forces 100%, and the attenuation it caused is measured: same capture chain, one session, sink as created mean −75.1 dB vs forced to 100% mean −36.1 dB, against a −91.0 dB floor. With the fix in place and no manual intervention the shipped default reads **mean −52.9 dB**. That is the whole evidence. | the floor is `max == mean == −91.0 dB` with scrcpy killed; a fresh sink and a pre-existing 20% sink were both checked to come up at `vol 1.00`. What is NOT shown: anyone speaking. One quiet-room sample cannot separate speech from ambient, so no speech-level claim is made. |
 
-### Trust store: what is proven, and the one lead still open
+### Trust store: two stores, neither write observed
 
-The claim under test is "revoke the PC, and the setup heals itself with no
-prompt". It is **partly** proven, and the split matters.
+There are TWO independent stores, and conflating them produced several wrong
+conclusions tonight:
 
-PROVEN - the fast path, and it is durable. After the earlier `keys=0` run, a
-later launch logged `keys=1` and `manager key: 1/1 host key(s) present in
-secure authorized_adb_keys`, then went straight to `advertising adb on port
-5555`. That run performed **no network discovery at all**: no `start
-discovery`, no `nsd`, no sweep, no 7911. A key is present in the store, the
-app does no network work, and adb authorizes. Revoking did not regress it, so
-this is not a one-shot accident.
+  1. `/data/misc/adb/adb_keys` - the FILE adbd reads to authorize a host.
+  2. `settings secure authorized_adb_keys` - AdbDebuggingManager's PROMPT list,
+     which is what the Wireless-debugging UI shows as "paired devices".
 
-STILL UNOBSERVED - the writer. Nothing in any log has recorded a fetch being
-consumed by the phone or `settings put secure authorized_adb_keys` running.
-`ensureManagerAuthorizedKey()` is idempotent and skips the write when the key is
-already present, which is exactly what it did on the run above, so the write
-path is untested in practice. The writer is idempotent by design, so
-"the key is present" cannot distinguish "the app wrote it" from "the platform
-restored it when the PC was revoked". Your observation that revoking the PC
-triggers a root-access push is consistent with the latter.
+`ensureManagerAuthorizedKey()` only ever touches (2). It reads keys FROM (1) and
+publishes them to (2); it never writes (1). With (1) empty and no
+`pendingHostKey` from the 7911 handover it logs `manager key: no host key
+available; leaving store untouched` and returns - so the app CANNOT repopulate an
+empty store, and it is not what re-added the paired entry.
 
-TWO MEASUREMENT TRAPS THAT PRODUCED WRONG CONCLUSIONS HERE:
+The `keys=N` on the launch line is a count read from (1). So `keys=1` says the
+FILE is non-empty, and `manager key: 1/1 present` says (2) already matched.
 
-  - `Log2.resetForNewRun()` TRUNCATES the log on every launch. A paste can
-    never show a previous run's fetch, so "it is not in this log" is not
-    evidence the fetch never happened. The 11:29 run that would have shown it
-    was destroyed by the 12:12 launch before it was read.
-  - `serve_key(once=True)` is one-shot. A local `curl` consumes the single
-    request and sets `served["n"]=1`, so `served` in the host log is not
-    evidence the phone asked. My own probe is what made the earlier run look
-    successful. Commit `72d40b3` claimed the bootstrap was proven on that basis
-    and was wrong.
+PROVEN - the fast path is durable and costs no network. Runs at 12:12 and 12:58
+logged `keys=1`, `manager key: 1/1 present`, then went straight to
+`advertising adb on port 5555` with NO `start discovery`, no `nsd`, no sweep, no
+7911. A key is present, the app does no network work, and adb authorizes.
 
-OPEN LEAD, the one actionable thing left. The final failed sweep reported
+NOT PROVEN - that this app ever wrote anything. The file went `keys=0` at 11:29
+to `keys=1` at 12:12 with **no app launch in between**, so the app was not
+running when the key appeared. The user also observed a root push on revoke.
+Both point at the platform's own approval writing the file. The empty-store
+handover that must write it has never been observed.
+
+FIVE TRAPS THAT PRODUCED WRONG CONCLUSIONS HERE, all mine:
+
+  1. `Log2.resetForNewRun()` TRUNCATES the log every launch. A paste can never
+     show an earlier run's fetch, so "not in this log" is NOT evidence it never
+     happened - the inference runs the other way. The 11:29 run was destroyed by
+     the 12:12 launch before it was read.
+  2. `serve_key(once=True)` is one-shot and a local `curl` sets `served=1`. My
+     own probe is what made commit `72d40b3` look like proof; that claim was
+     retracted in 647f935.
+  3. Reading `settings get secure authorized_adb_keys` while adb was
+     `unauthorized` returned the pairing dialog instead of a value. I read
+     "host key NOT found" out of that and drew a conclusion from a check that
+     had not actually run.
+  4. Claiming the app repopulates the paired-device entry on revoke. It cannot -
+     see the code above. I asserted it to explain a symptom without reading the
+     path, and the user was about to act on it.
+  5. Absolute dB thresholds are not controls; this machine's room mics bleed
+     into every null sink. The valid control is live-vs-dead on one node.
+
+OPEN LEAD, the one actionable thing left. The last failed sweep reported
 `ConnectException=1` against 252 timeouts while the host WAS listening on
 .13:7911. One immediate refusal rather than 253 silent timeouts is a different
-failure shape and may mean the phone cannot reach the host on that port -
-firewall, client isolation, or the sweep not trying the host's own subnet. It
-is the difference between the sweep working and not working, and it is
-unresolved.
+failure shape - firewall, client isolation, or the sweep not trying the host's
+own subnet. It is the difference between the sweep working and not working, and
+it is unresolved.
 
-To settle the whole thing in one run:
-  1. revoke the paired PC again (this makes the app run the writer),
-  2. press "Let phone in" on the host and do NOT curl it,
-  3. open the phone app, let the sweep run,
-  4. paste the log - it should show a non-empty `live on 7911 = [...]` list and
-     a later launch with `keys=1` and no discovery.
+To settle it in one run:
+  1. `adb devices` must read `unauthorized` first,
+  2. `serve_key` must already be listening on the LAN address, started with
+     `once=False`, and **not curled**,
+  3. open the phone app and let the sweep run,
+  4. paste the log immediately - it rotates on the next launch.
+     It should show a non-empty `live on 7911 = [...]` list, a write to the
+     trust store, and a later launch with `keys=1` and no discovery.
+
 ### On controls
 
 Three controls in this project are invalid and were withdrawn after
