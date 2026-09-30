@@ -12,6 +12,9 @@ Panel {
   // controlled through the shell's panel loader and must not register a
   // second handler for the same target.
   manageIpc: false
+  // barForeground is supplied by the shell: /usr/share/omarchy/shell/Ui/Panel.qml
+  // defines it as `bar ? bar.barForeground : Color.foreground`, so it is already
+  // guarded and undefined-color is not a failure mode to defend against here.
   readonly property color foreground: barForeground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
