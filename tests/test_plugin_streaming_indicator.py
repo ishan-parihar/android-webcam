@@ -176,8 +176,15 @@ finally:
     mirror.kill(); mirror.wait()
 
 # The stop button shares the hazard: pkill -f could kill the shell running it.
+# Loops over the PANEL too. Its toggleProc used to carry its own pkill, and a
+# grep for pkill/pgrep in executed commands missed it - so the panel's stop path
+# was uncovered at exactly the moment it mattered. Four call sites exist across
+# two files and this loop now sees all of them.
 BAD_STOP = 'command: ["bash","-c","pkill -f'
-for path, label in ((PLUGIN, "installed"), (SRC, "repo")):
+for path, label in ((PLUGIN, "installed bar"), (SRC, "repo bar"),
+                    (PLUGIN.parent / "Panel.qml", "installed panel"),
+                    (pathlib.Path(__file__).resolve().parents[1]
+                     / "omarchy-plugin/Panel.qml", "repo panel")):
     if not path.exists():
         continue
     text = path.read_text()
@@ -190,14 +197,29 @@ for path, label in ((PLUGIN, "installed"), (SRC, "repo")):
     # bug in prose, and "pkill" not in text flags the explanation instead of
     # the defect. Fourth time in this work that a comment has defeated a
     # plain-text check.
-    execs = re.findall(r'command:\s*\[[^\]]*\]', text)
+    # Strip comment lines, then search the CODE. Two earlier attempts were too
+    # blunt in opposite directions: matching the raw text flags this file's own
+    # explanation of the old bug, while `command:\s*\[[^\]]*\]` truncates at the
+    # FIRST `]` - which cuts off a multi-line concatenated `bash -c` string
+    # before the verb inside it, and reported the panel as having no `stop` when
+    # it does. This is the fourth and fifth time in this work that a check on
+    # QML text measured the wrong thing.
+    code = "\n".join(ln for ln in text.splitlines()
+                     if not ln.lstrip().startswith("//"))
     check(f"{label} stop is not a blanket pkill",
-          not any("pkill" in e for e in execs),
+          "pkill" not in code,
           "pkill matches the NAME, which the screen mirror also has - stopping "
           "the webcam would take a mirror session down with it")
+    # The verb appears two ways across these files: as the argv
+    # ["android-webcam", "stop"] (the bar) and inside a bash -c string as the
+    # words `android-webcam stop` (the panel). Match both literally. A regex
+    # spelling it as `"android-webcam",\s*"stop"` matches the bar only, and one
+    # searching for the bare words matches the panel only - so an earlier
+    # version of each was wrong for half the call sites, which is how the
+    # panel's stop path went uncovered in the first place.
     check(f"{label} stop check uses the camera-scoped verb",
-          any('"android-webcam", "stop"' in e for e in execs),
-          "expected command: [\"android-webcam\", \"stop\"]")
+          ("android-webcam stop" in code) or ('"android-webcam", "stop"' in code),
+          "expected `android-webcam stop` (argv form or inside bash -c)")
 
 FAKE_BIN.unlink(missing_ok=True)
 FAKE_SRC.unlink(missing_ok=True)
