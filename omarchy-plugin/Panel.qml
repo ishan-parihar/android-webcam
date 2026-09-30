@@ -150,6 +150,11 @@ Panel {
         foreground: root.foreground
         fontFamily: root.fontFamily
         fontSize: Style.font.subtitle
+        // focusable defaults to FALSE in PanelActionButton.qml (line 38), and
+        // activeFocusOnTab is bound to it (line 45). Without this the primary
+        // action is still mouse-only - the same class of gap as the hand-rolled
+        // rows this replaced, one layer down.
+        focusable: true
         onClicked: toggleProc.running = true
       }
 
@@ -245,6 +250,7 @@ Panel {
           foreground: root.foreground
           fontFamily: root.fontFamily
           fontSize: Style.font.body
+          focusable: true          // defaults to false; see above
           onClicked: openGuiProc.running = true
         }
     }

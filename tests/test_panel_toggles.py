@@ -270,6 +270,21 @@ with tmpcfg():
           "onSelected" not in code,
           "ButtonGroup has no `selected` signal; the handler is silently ignored")
 
+    # focusable defaults to FALSE in PanelActionButton.qml and activeFocusOnTab
+    # is bound to it, so a button that omits it is mouse-only even though it is
+    # a proper shell component. Assert it rather than trusting the default.
+    if (UI / "PanelActionButton.qml").exists():
+        pab = (UI / "PanelActionButton.qml").read_text()
+        default_focusable = "property bool focusable: true" not in pab
+        blocks = re.findall(r"^\s*PanelActionButton\s*\{(.*?)^\s*\}", code,
+                            re.M | re.S)
+        unfocusable = [b.strip().splitlines()[0][:40] for b in blocks
+                       if default_focusable and "focusable" not in b]
+        check("every PanelActionButton in the panel is keyboard focusable",
+              not unfocusable,
+              f"{len(unfocusable)} button(s) omit focusable and focusable defaults "
+              f"to false: {unfocusable}")
+
     # Every control must still be wired to a write, not merely present.
     for control in ("torch", "mic_to_host", "with_preview",
                     "camera_facing", "resolution"):
