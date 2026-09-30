@@ -1039,55 +1039,31 @@ public class MainActivity extends Activity {
                     // advertising, and only when the port is genuinely wrong, so
                     // a healthy phone is never restarted.
                     int pinnedPort = actualAdbPort();
-                    // Declared out here because the advertise step below needs
-                    // them even when pinnedPort was already fine.
-                    String prop = su("getprop service.adb.tcp.port").trim();
-                    String pid = su("pidof adbd").trim();
-                    boolean daemonAlive = !pid.isEmpty();
                     if (pinnedPort != ADB_PORT) {
-                        // adbd is not on ADB_PORT. Two genuinely different
-                        // faults, and they must not get the same repair.
+                        // Reached only when adbd was up at the :1009 check and
+                        // something changed after it - a narrow gap, and NOT the
+                        // case a phone in normal use hits. There was a restart
+                        // branch here, and it was removed on purpose:
                         //
-                        //  DAEMON ABSENT - `pidof adbd` is empty. Nothing is
-                        //    running, so only a start can fix it. This is the
-                        //    17:06 case: the listening set was
-                        //    [44299, 1716, 50037, 5060] and 44299 was NOT adbd
-                        //    - the host got Connection refused on it - so the
-                        //    old "any port in 30000-49999 means adbd is up"
-                        //    rule was a false positive that skipped the one
-                        //    repair that would have worked.
-                        //  DAEMON ALIVE ON ANOTHER PORT - restarting on every
-                        //    launch would never converge, because adbd reads
-                        //    service.adb.tcp.port at STARTUP and this app
-                        //    already wrote 5555 to it, so the property is not
-                        //    evidence either way. Do NOT restart. Advertise the
-                        //    port adbd actually holds; the host can use it.
-                        if (daemonAlive) {
-                            // No restart. The port is wrong but adbd is up, and
-                            // bouncing it every launch is worse than a port
-                            // number that differs from our preference.
-                            Log2.i("fast path: adbd is alive (pid=" + pid
-                                    + ") but not on " + ADB_PORT
-                                    + "; NOT restarting it - it reads its port at "
-                                    + "startup and would be bounced every launch. "
-                                    + "Advertising the port it actually holds.");
-                        } else {
-                            Log2.i("fast path: adbd not running (service.adb.tcp.port="
-                                    + (prop.isEmpty() ? "<empty>" : prop)
-                                    + ", listening=" + listeningPorts()
-                                    + "); starting it on " + ADB_PORT);
-                            startAdbd();
-                        }
-                        // The rebind is asynchronous. Poll briefly, so the
-                        // advertisement below names a port adbd really holds.
-                        for (int i = 0; i < 10 && actualAdbPort() != ADB_PORT; i++) {
-                            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-                        }
-                        pinnedPort = actualAdbPort();
-                        Log2.i("fast path: after repair actualAdbPort="
-                                + (pinnedPort > 0 ? pinnedPort : "none")
-                                + (pinnedPort == ADB_PORT ? " (converged)"
-                                   : " (did not converge; service.adb.tcp.port is not honoured on this device)"));
+                        //  - :1009 ALREADY starts adbd when it is absent, so
+                        //    this can only ever fire in that gap.
+                        //  - adbd reads service.adb.tcp.port at startup, so a
+                        //    restart cannot move a phone whose adbd holds a
+                        //    different port - it would just be bounced on every
+                        //    launch and never converge.
+                        //  - the port we can prove is ADB_PORT, and if adbd were
+                        //    genuinely gone, :1009 had already handled it.
+                        //
+                        // So: log the fact and move on. actualAdbPort() stays
+                        // fail-closed below, which is the correct outcome - the
+                        // host is told nothing rather than a port that may
+                        // belong to another service (the 44299 false positive,
+                        // and the original 35979 bug).
+                        Log2.i("fast path: adbd not on " + ADB_PORT
+                                + " (actualAdbPort=" + (pinnedPort > 0 ? pinnedPort : "none")
+                                + ", was started earlier this launch); not restarting, "
+                                + "since adbd reads its port at startup and would be "
+                                + "bounced every launch");
                     }
                     // An already-trusted phone NEVER reaches provision(), so
                     // the AdbDebuggingManager store would never be written and
@@ -1102,32 +1078,19 @@ public class MainActivity extends Activity {
                     // mDNS record to find. Without it a host-side discovery
                     // failure is indistinguishable from a network fault.
                     int fastPort = actualAdbPort();
-                    if (fastPort <= 0 && daemonAlive) {
-                        // actualAdbPort() correctly refuses to guess - it will not
-                        // hand the host an arbitrary 30xxx port, which was the
-                        // original 35979 bug. But when we have just established
-                        // that adbd IS alive and simply holds a different port,
-                        // that is measured, not a guess, and the host can use it.
-                        // Cross-checking the property (adbdListeningPort) rather
-                        // than the range is what makes this safe.
-                        fastPort = adbdListeningPort();
-                        if (fastPort > 0) {
-                            Log2.i("advertising adb on port " + fastPort
-                                    + " (not " + ADB_PORT + ", but confirmed by "
-                                    + "service.adb.tcp.port rather than guessed)");
-                        }
-                    }
                     if (fastPort > 0) {
                         Log2.i("advertising adb on port " + fastPort);
                         advertiseAdb(fastPort);
                     } else {
-                        // Everything above already ran. Say what is actually
-                        // known, so the next reader can tell a refused port
-                        // from a daemon that never came up.
-                        Log2.i("not advertising: no verified adb port; daemonAlive="
-                                + daemonAlive + " service.adb.tcp.port="
-                                + (prop.isEmpty() ? "<empty>" : prop)
-                                + " listening=" + listeningPorts());
+                        // Say what is actually known, so the next reader can
+                        // tell a refused port from a daemon that never came up.
+                        // There is deliberately no fallback that guesses: the
+                        // 30xxx-49xxx range produced the 44299 false positive,
+                        // and the 35979 bug before it. Refusing is the point.
+                        Log2.i("not advertising: no verified adb port; adbd was "
+                                + "started earlier this launch and "
+                                + "service.adb.tcp.port names no listening port; "
+                                + "listening=" + listeningPorts());
                     }
                     ui.post(() -> done("Ready — your computer can use this phone as a "
                             + "webcam. " + keys + " trusted computer(s)."));
