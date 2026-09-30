@@ -65,6 +65,15 @@ print("\ncase 3: a real pipeline ERROR - awk cannot read the file (chmod 000)")
 LOCKED = KEYS.parent / "locked_keys"
 LOCKED.write_text(f"{OTHER} host\n")
 LOCKED.chmod(0o000)
+# Confirm this is a REAL error before concluding anything from it. Under root
+# the mode bits are bypassed and awk would succeed, quietly turning case 3 into
+# a re-run of case 1 - a test that cannot fail. Asserted, not assumed.
+probe = run(f"awk '{{print $1}}' {LOCKED} >/dev/null 2>&1")
+if probe.returncode == 0:
+    raise AssertionError(
+        "case 3 is vacuous: awk READ the 0o000 file (running as root?), so this "
+        "is not a pipeline error and the conclusion below would be false")
+print(f"  awk exit on the 0o000 file = {probe.returncode} (nonzero: a real error)")
 try:
     run(f"awk '{{print $1}}' {LOCKED} | grep -qxF '{KEY}' 2>/dev/null "
         f"|| printf '%s APPENDED\\n' '{KEY}' >> {KEYS}")
