@@ -2,9 +2,9 @@
 import gi
 gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")
 from gi.repository import Gtk, Adw, GLib, Gio
-import subprocess, threading, shlex, os, time, logging
+import subprocess, threading, shlex, os, time, logging, sys
 from pathlib import Path
-from .config import load, save, SIZES, FPS_CHOICES
+from .config import load, save, update, SIZES, FPS_CHOICES
 from .backend import build_argv, adb_ping, connect_adb, discover_phone, quick_reachable, _wait_device_ready, _adb_shell_echo
 
 # log to /tmp for diagnosis when the GUI is launched via desktop file (no
@@ -880,8 +880,71 @@ class App(Adw.Application):
                               license_type=Gtk.License.MIT_X11)
         dlg.present()
 
+def set_cmd(argv):
+    """`android-webcam set <key> <value> [--key value ...]` — the panel's writer.
+
+    One verb, many keys, because a toggle that needs its own subcommand is a
+    toggle nobody wires up. Values are coerced by the shape of the default:
+    true/false for bools, int for ints, and so on, so the panel sends "on"
+    rather than having to know that `torch` is a boolean.
+
+    Deliberately NOT a flag on backend.cli(): the flag list in main() is a
+    literal tuple of "--" strings, so a bare subcommand would match none of
+    them and fall through to opening the GTK window. It is dispatched before
+    that check, and never reaches argparse.
+
+    Every write goes through config.update(), which merges rather than
+    overwrites. The phone pushes its real adb endpoint into this file at
+    runtime, so a whole-dict save from a stale snapshot would revert the port.
+    """
+    from .config import DEFAULTS
+    from .config import update as _update
+    changes, i = {}, 0
+    args = list(argv)
+    while i < len(args):
+        key = args[i].lstrip("-").replace("-", "_")
+        if i + 1 >= len(args):
+            print(f"set: {key} needs a value", file=sys.stderr)
+            return 2
+        raw = args[i + 1]
+        default = DEFAULTS.get(key)
+        if isinstance(default, bool):
+            truthy = {"on", "true", "1", "yes", "enable", "enabled"}
+            falsy = {"off", "false", "0", "no", "disable", "disabled"}
+            if raw.lower() not in truthy | falsy:
+                print(f"set: {key} is a switch; use on/off, not {raw!r}", file=sys.stderr)
+                return 2
+            changes[key] = raw.lower() in truthy
+        elif isinstance(default, int):
+            try:
+                changes[key] = int(raw)
+            except ValueError:
+                print(f"set: {key} wants a whole number, not {raw!r}", file=sys.stderr)
+                return 2
+        else:
+            changes[key] = None if raw.lower() in ("none", "null", "") else raw
+        i += 2
+    if not changes:
+        print("set: nothing to do", file=sys.stderr)
+        return 2
+    try:
+        written = _update(**changes)
+    except KeyError as e:
+        print(f"set: {e}", file=sys.stderr)
+        return 2
+    for k in changes:
+        print(f"{k}={written[k]}")
+    return 0
+
+
 def main():
     import sys
+    # Subcommands are dispatched FIRST. The flag test below is a literal tuple
+    # of "--" strings, so `set ...` would match none of them and fall through
+    # to launching the GTK window - which is exactly what a panel button must
+    # never do.
+    if len(sys.argv) > 1 and sys.argv[1] == "set":
+        return set_cmd(sys.argv[2:])
     # CLI passthrough: android-webcam --front --720 etc without GUI
     if any(a in sys.argv for a in ("--help","-h","--dry-run","--front","--back","--720","--1080","--torch","--with-audio","--no-window","--with-preview")) and "--gui" not in sys.argv:
         # if any CLI flag, run headless backend.cli instead of GUI — unless --gui forced
