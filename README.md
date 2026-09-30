@@ -21,8 +21,10 @@ scrcpy 4.1 (host) --decode--> v4l2loopback --> /dev/video0   (webcam)
                            \--> PipeWire null sink --> default source (mic)
 ```
 
-There is no APK of ours in the loop. The only thing running on the phone is
-scrcpy's own server, pushed over `adb` at launch.
+There is no APK in the video path. The only thing streaming the camera is
+scrcpy's own server, pushed over `adb` at launch. An optional companion app
+(`android/`) exists only to capture device-side logs to `aw.log`, which
+`android-webcam --phone-log` can then pull; the webcam works without it.
 
 ## Requirements
 
@@ -171,7 +173,7 @@ Layout:
 ```
 src/android_webcam/     app.py (CLI + GTK), backend.py (scrcpy, adb, audio), config.py
 Panel.qml BarWidget.qml manifest.json   the Omarchy plugin - these ARE the plugin
-android/                a legacy unused APK; the phone runs scrcpy's own server
+android/                the companion app: optional log capture to aw.log on the phone
 tests/                  one file per behaviour
 ```
 

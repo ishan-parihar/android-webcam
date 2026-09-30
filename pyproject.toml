@@ -26,4 +26,8 @@ android-webcam-cli = "android_webcam.backend:cli"
 packages = ["src/android_webcam"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/", "assets/", "omarchy-plugin/", "scripts/"]
+# The Omarchy plugin IS the repo root (Panel.qml, BarWidget.qml, manifest.json):
+# `omarchy plugin add` reads the top-level manifest. Packaging "omarchy-plugin/"
+# here shipped no plugin at all after the cutover, so the sdist failed the
+# validator's manifest check. test_readme_claims.py fails if that string returns.
+include = ["src/", "assets/", "scripts/", "Panel.qml", "BarWidget.qml", "manifest.json", "README.md", "LICENSE"]

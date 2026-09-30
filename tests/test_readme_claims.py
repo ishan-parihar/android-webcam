@@ -118,6 +118,19 @@ check("install.sh copies the plugin from the repo ROOT (one copy, no duplicate)"
       and not (REPO / "omarchy-plugin").exists(),
       "install.sh still reads omarchy-plugin/, which no longer exists")
 
+# A published sdist must carry the plugin, or `omarchy plugin add` from the
+# tarball fails the validator's manifest check. This shipped a package with no
+# Panel.qml at all, silently, because the include list still named the directory
+# that the cutover deleted.
+sdist = re.search(r"\[tool\.hatch\.build\.targets\.sdist\](.*?)(\n\[|\Z)",
+                  pyproject, re.S)
+# Comments before the include line would otherwise swallow the match.
+sdist_body = re.sub(r"#.*", "", sdist.group(1)) if sdist else ""
+check("the sdist ships the plugin from the repo root",
+      all(n in sdist_body for n in ("Panel.qml", "BarWidget.qml", "manifest.json"))
+      and "omarchy-plugin/" not in sdist_body,
+      f"sdist include is missing the root plugin files: {sdist_body.strip()[:90]}")
+
 # --- the plugin's own control path -----------------------------------------
 panel = (REPO / "Panel.qml").read_text()
 check("README's claim that the panel uses setsid -f is true",
@@ -130,6 +143,17 @@ check("no TODO/FIXME/XXX placeholder in either README",
       not re.search(r"\b(TODO|FIXME|XXX)\b", BOTH),
       "user-facing README contains a placeholder")
 
+# --- the app's real role -----------------------------------------------------
+# I first wrote "the APK is legacy/unused". That was wrong: backend.py reads
+# aw.log out of that app's data dir. Assert the README's description matches the
+# code, so the claim cannot drift back.
+check("README does not call the android/ app unused while the host reads its log",
+      ("dev.ishanp.androidwebcam" not in source)
+      or ("unused" not in README.lower()
+          and "legacy" not in README.lower()),
+      "host reads the companion app's aw.log, so README must not call it unused")
+check("README describes the companion app as log capture, which is what it does",
+      "aw.log" in README and "android/" in README)
 # --- the negative controls: this gate CAN fail -----------------------------
 for bogus in ("--mic-mute-offx",):
     check(f"the flag check would reject an invented flag ({bogus})",
