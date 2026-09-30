@@ -854,9 +854,10 @@ def _default_gateway() -> str:
     return "8.8.8.8"                           # routable; nothing is sent
 
 
-def serve_key(host: str | None = None, port: int = PROVISION_PORT,
-              advertise: bool = True, once: bool = True,
-              grace: int | None = None) -> None:
+    def serve_key(host: str | None = None, port: int = PROVISION_PORT,
+                  advertise: bool = True, once: bool = True,
+                  grace: int | None = None,
+                  max_wait: float | None = 600) -> None:
     """Advertise this host and hand the phone its adb PUBLIC key over the LAN.
 
     This is what removes the last manual step: the key is 715 chars of base64
@@ -865,9 +866,12 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
     Safety properties, deliberately:
       * binds the SPECIFIC LAN address, not 0.0.0.0, so nothing off-LAN and no
         other service on this machine can reach it;
-      * serves the key, then lingers ~45s so a phone retry that was already in
-        flight is not left with a dead endpoint, then closes itself;
-      * prints the peer address, so the pairing is visible to the operator.
+        * serves the key, then lingers ~45s so a phone retry that was already in
+          flight is not left with a dead endpoint, then closes itself;
+        * max_wait=None keeps serving until Ctrl-C. The default 600s deadline
+          applies even with once=False, which reads as "the server is up" when
+          the phone arrives after it has already gone;
+        * prints the peer address, so the pairing is visible to the operator.
     """
     from http.server import BaseHTTPRequestHandler, HTTPServer
     import socketserver, threading
@@ -880,9 +884,15 @@ def serve_key(host: str | None = None, port: int = PROVISION_PORT,
     if host is None:
         host = _lan_ip()
 
-    served = {"n": 0, "peer": "-"}
-    deadline = time.monotonic() + 600
-    GRACE = grace if grace is not None else 45   # outlives the phone's ~30s of retries
+      served = {"n": 0, "peer": "-"}
+      # max_wait=None waits forever. A hardcoded 600 here is a trap: with
+      # once=False the server still self-terminates at 10 minutes, so a phone
+      # that launches later finds a closed port and its sweep fails against a
+      # host that is genuinely up. Observed 13:15 - the log read
+      # 'timed out, no phone asked for the key' and I read that as the phone
+      # never trying, when the endpoint had been gone for hours.
+      deadline = None if max_wait is None else time.monotonic() + max_wait
+      GRACE = grace if grace is not None else 45   # outlives the phone's ~30s of retries
 
     class H(BaseHTTPRequestHandler):
         def do_POST(self):
