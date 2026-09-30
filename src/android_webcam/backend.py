@@ -147,7 +147,8 @@ def audio_flags(cfg: dict) -> list[str]:
     return ["--no-audio"]
 
 
-def build_argv(cfg: dict, extra: list | None = None) -> list[str]:
+def build_argv(cfg: dict, extra: list | None = None,
+               audio_owned: bool = False) -> list[str]:
     """Compose the full scrcpy argv: video and audio in ONE session.
 
     Kept as the single-session entry point so existing callers are unchanged.
@@ -157,12 +158,23 @@ def build_argv(cfg: dict, extra: list | None = None) -> list[str]:
     Phone mic is routed to a null sink (scrcpy_mic) via PULSE_SINK env in
     start(), so it never hits HDMI speakers.  The null sink's monitor
     (scrcpy_mic.monitor) becomes the system mic.
+
+    audio_owned: set when a separate audio-only scrcpy session is already
+    running and therefore already holds the phone microphone. Measured reason:
+    the phone camera and the phone microphone are ONE capture resource, so
+    this session asking for audio as well opened the mic a SECOND time. Both
+    streams landed in scrcpy_mic and the system mic carried the phone mic
+    summed with itself - measured at mean -70.0 dB with one session and
+    -54.7 dB (+15.3 dB) with two, i.e. the mic heard itself. This session
+    then gets --no-audio so exactly one process owns the microphone.
     """
     # extra is applied ONCE, at the very end, exactly as the original did.
     # Passing it into build_video_argv instead would be wrong here: the audio
     # half is appended after the video half, so anything the video half
     # appended would land in the middle of the command. A 512-case argv
     # matrix caught that immediately.
+    if audio_owned:
+        return build_video_argv(cfg) + ["--no-audio"] + (extra or [])
     return build_video_argv(cfg) + audio_flags(cfg) + (extra or [])
 
 

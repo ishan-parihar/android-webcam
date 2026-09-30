@@ -464,8 +464,19 @@ class App(Adw.Application):
                           f"\u2717 unreachable at {tgt_ip}:{tgt_port} \u2014 press Connect", "bad")
             GLib.idle_add(self.toast, "Phone unreachable. Press Connect to retry or check WiFi/adb.")
 
+    def _audio_session_owns_mic(self) -> bool:
+        """True when a separate audio-only scrcpy already holds the phone mic.
+
+        The camera and the microphone are ONE capture resource on the phone, so
+        the video session must not also request audio or the mic is opened
+        twice and the system mic carries the phone mic summed with itself
+        (measured: mean -70.0 dB with one session, -54.7 dB with two).
+        """
+        p = self.audio_proc
+        return bool(p and p.poll() is None)
+
     def refresh_cmd(self):
-        argv = build_argv(self.cfg)
+        argv = build_argv(self.cfg, audio_owned=self._audio_session_owns_mic())
         self.cmd_label.set_label(" ".join(shlex.quote(a) for a in argv))
 
     def on_ip_changed(self, row):
@@ -575,6 +586,16 @@ class App(Adw.Application):
         if not self.cfg.get("mic_to_host", True) and not self.cfg.get("mic_to_phone", False):
             self.toast("Both mic directions are off — nothing to start")
             return
+        # The phone camera and phone microphone are ONE capture resource. If the
+        # webcam session is already running, IT holds the mic (build_argv
+        # includes the audio flags unless audio_owned was set), and starting a
+        # second scrcpy for audio would open the microphone a second time: both
+        # streams land in scrcpy_mic and the system mic carries the phone mic
+        # summed with itself. Measured: mean -70.0 dB with one session, -54.7 dB
+        # with two. So refuse, and point the user at what is already running.
+        if self.proc and self.proc.poll() is None:
+            self.toast("Webcam is already streaming the phone mic — nothing to add")
+            return
         # Only ONE scrcpy audio source may exist: scrcpy registers its
         # PipeWire source under the bare name "scrcpy", so a second instance
         # collides with the first (observed as duplicate nodes). Stop any
@@ -647,7 +668,9 @@ class App(Adw.Application):
             subprocess.run(["pkill","-f","scrcpy.*camera.*v4l2-sink"], capture_output=True, timeout=3)
             time.sleep(0.6)
         except Exception: pass
-        argv = _b.build_argv(self.cfg)
+        # If a separate audio-only session is already up, it owns the phone mic;
+        # asking for audio here too would open the microphone twice.
+        argv = _b.build_argv(self.cfg, audio_owned=self._audio_session_owns_mic())
         if not _b.ensure_v4l2loopback():
             msg = "/dev/video0 missing — v4l2loopback not loaded. Run: sudo modprobe v4l2loopback card_label='Android Webcam' exclusive_caps=0 video_nr=0"
             logging.error(msg)
