@@ -1,0 +1,175 @@
+"""Each panel toggle must change what the BACKEND reads, not just a QML property.
+
+A toggle that flips a QML `checked` binding and writes nothing looks identical
+to a working one until someone uses it. So every control here is asserted at
+the layer it is supposed to affect:
+
+  - torch / camera_facing / resolution / fps must change the argv that
+    build_video_argv produces, because that argv is what scrcpy is actually
+    launched with
+  - mic_to_host must change the audio flags in that same argv
+  - the pushed android_port must survive all of it
+  - the panel must read state from the config FILE
+
+The last one is the important structural check: if the panel kept its own copy
+of the toggles, the dot and the buttons would disagree exactly the way the bar's
+streaming indicator did. So the test asserts the panel invokes `set` (the merge
+writer) rather than writing the file itself, and re-reads the file to refresh.
+"""
+import json
+import pathlib
+import re
+import sys
+import tempfile
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "src"))
+from android_webcam import config as cfgmod  # noqa: E402
+from android_webcam import backend  # noqa: E402
+
+PANEL = REPO / "omarchy-plugin/Panel.qml"
+INSTALLED = (pathlib.Path.home()
+             / ".config/omarchy/plugins/ishanp.android-webcam/Panel.qml")
+
+REAL_CONFIG = pathlib.Path.home() / ".config/android-webcam/config.json"
+real_before = REAL_CONFIG.read_bytes() if REAL_CONFIG.exists() else None
+
+failures = 0
+
+
+def check(name, cond, detail=""):
+    global failures
+    print(("ok    " if cond else "FAIL  ") + name + ("" if cond else f": {detail}"))
+    if not cond:
+        failures += 1
+
+
+class tmpcfg:
+    def __enter__(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp())
+        self.saved = (cfgmod.CONFIG_DIR, cfgmod.CONFIG_FILE, cfgmod.LEGACY_CONFIG)
+        cfgmod.CONFIG_DIR = self.dir
+        cfgmod.CONFIG_FILE = self.dir / "config.json"
+        cfgmod.LEGACY_CONFIG = self.dir / "legacy"
+        return self
+
+    def __exit__(self, *a):
+        cfgmod.CONFIG_DIR, cfgmod.CONFIG_FILE, cfgmod.LEGACY_CONFIG = self.saved
+
+
+def argv_for(**over):
+    """The exact argv the backend would launch scrcpy with."""
+    cfg = cfgmod.load()
+    cfg.update(over)
+    return cfg, backend.build_argv(cfg, audio_owned=False)
+
+
+with tmpcfg():
+    cfgmod.save({**cfgmod.DEFAULTS,
+                 "android_ip": "192.168.1.4", "android_port": 5555,
+                 "torch": False, "camera_facing": "back", "resolution": "1080p",
+                 "mic_to_host": False, "with_preview": False})
+
+    # ---------- each control must change the real argv ----------
+    base_cfg, base = argv_for()
+
+    _, torch_on = argv_for(torch=True)
+    check("torch on changes the scrcpy argv",
+          torch_on != base,
+          "argv identical with torch on and off - the toggle would do nothing")
+    check("torch on actually adds a torch flag",
+          any("torch" in a for a in torch_on),
+          f"argv={torch_on}")
+
+    _, front = argv_for(camera_facing="front")
+    check("camera_facing front changes the scrcpy argv",
+          front != base, f"argv identical; back was {base}")
+
+    _, small = argv_for(resolution="720p")
+    check("resolution 720p changes the scrcpy argv",
+          small != base, f"argv identical; 1080p was {base}")
+    check("720p really is the smaller stream",
+          "1280x720" in " ".join(small) and "1920x1080" not in " ".join(small),
+          f"argv={small}")
+
+    _, mic = argv_for(mic_to_host=True)
+    check("mic_to_host changes the scrcpy argv",
+          mic != base, "argv identical with the mic on and off")
+
+    # ---------- the two must be independent, not one shared switch ----------
+    _, torch_only = argv_for(torch=True)
+    _, mic_only = argv_for(mic_to_host=True)
+    check("torch and mic_to_host are independent controls",
+          torch_only != mic_only,
+          "both toggles produce the same argv, so one is shadowing the other")
+
+    # ---------- the pushed endpoint survives every control ----------
+    after = cfgmod.load()
+    check("none of the toggles reverted the phone's pushed endpoint",
+          after["android_port"] == 5555 and after["android_ip"] == "192.168.1.4",
+          f"{after['android_ip']}:{after['android_port']}")
+
+    # ---------- the panel drives `set`, not the file ----------
+    panel_text = PANEL.read_text()
+    check("the panel writes through the `set` merge writer",
+          '"android-webcam", "set"' in panel_text,
+          "panel does not invoke `set`; a direct file write can clobber the port")
+    check("the panel never writes config.json itself",
+          not re.search(r'>\s*~?/?\.config/android-webcam/config\.json', panel_text),
+          "panel appears to redirect into the config file")
+
+    # ---------- the panel reads state from the file, not from memory ----------
+    check("the panel re-reads the config file",
+          "config.json" in panel_text,
+          "panel has no reader, so it can only remember what was clicked")
+    check("state is bound to the read, not a local variable",
+          'checked: root.truthy(' in panel_text
+          and 'root.value("camera_facing"' in panel_text
+          and 'root.value("resolution"' in panel_text,
+          "toggles are not driven by the config read")
+    check("the panel refreshes after a write",
+          "cfgReader.running = true" in panel_text,
+          "panel writes but never re-reads, so it would show stale state")
+
+    # ---------- every control the panel offers is a real config key ----------
+    offered = set(re.findall(r'root\.apply\("([a-z_]+)"', panel_text))
+    offered |= set(re.findall(r'root\.(?:truthy|value)\("([a-z_]+)"', panel_text))
+    unknown = offered - set(cfgmod.DEFAULTS)
+    check("every control the panel offers is a real config key",
+          not unknown, f"panel offers keys config does not define: {sorted(unknown)}")
+    check("the panel covers the controls the user asked for",
+          {"torch", "mic_to_host", "camera_facing", "resolution"} <= offered,
+          f"offered: {sorted(offered)}")
+
+    # ---------- no self-matching process check ----------
+    # Match the EXECUTED command only, never a comment. The panel documents the
+    # old bug in prose, and a plain substring test fails on the explanation
+    # rather than on the defect - which is what a substring test did here first.
+    execs = re.findall(r'command:\s*\[[^\]]*\]', panel_text)
+    check("no executed command uses pgrep -f / pkill -f",
+          not any("pgrep -f" in e or "pkill -f" in e for e in execs),
+          f"a -f pattern matches the shell running it: "
+          f"{[e for e in execs if '-f' in e]}")
+    check("the panel's status check matches the process name",
+          any("pgrep -x scrcpy" in e for e in execs), "expected pgrep -x scrcpy")
+
+    # ---------- Start must not open a GTK window, and must survive the panel --
+    check("Start passes a flag that routes to the headless backend",
+          any("--no-window" in e for e in execs),
+          "a bare `android-webcam` misses main()'s allowlist and opens the GUI")
+    check("Start is detached so closing the panel does not kill the stream",
+          any("setsid" in e for e in execs),
+          "a child of the panel's Process is killed when the panel closes")
+
+    # ---------- installed copy must match the repo ----------
+    if INSTALLED.exists():
+        check("installed Panel.qml is byte-identical to the repo",
+              INSTALLED.read_bytes() == PANEL.read_bytes(),
+              "installed copy has drifted; copy the repo file over it")
+
+real_after = REAL_CONFIG.read_bytes() if REAL_CONFIG.exists() else None
+check("the REAL config was never written", real_before == real_after,
+      "test clobbered the live config")
+
+print(f"\n{'FAILED' if failures else 'PASSED'}: {failures} failed")
+sys.exit(1 if failures else 0)
