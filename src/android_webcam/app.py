@@ -31,6 +31,12 @@ class App(Adw.Application):
         self.cfg = load()
         self._baseline = load()
         self.proc: subprocess.Popen | None = None
+        # The audio-only session is SEPARATE from the camera session. Two
+        # slots, so the mic can run with no webcam and the webcam can run
+        # with no mic. They share one adb link and the phone camera is a
+        # single resource the audio session never asks for (--no-video).
+        self.audio_proc: subprocess.Popen | None = None
+        self.audio_btn = None
         self.log_lines: list[str] = []
         self.connect("activate", self.on_activate)
 
@@ -230,6 +236,15 @@ class App(Adw.Application):
         self.stop_btn.connect("clicked", self.on_start_stop)
         btn_box = Gtk.Box(spacing=8); btn_box.append(self.start_btn); btn_box.append(self.stop_btn)
         box.append(btn_box)
+
+        # The mic is its OWN session, not a side effect of the webcam. Separate
+        # button because "use the phone as a microphone" is a standalone want:
+        # you may want the mic with no webcam, or keep the webcam running and
+        # stop the mic. Requires no /dev/videoN.
+        self.audio_btn = Gtk.Button(label="Start mic only (no webcam)")
+        self.audio_btn.add_css_class("suggested-action"); self.audio_btn.set_hexpand(True)
+        self.audio_btn.connect("clicked", self.on_mic_start_stop)
+        box.append(self.audio_btn)
 
         # Log expander
         self.log_view = Gtk.TextView(editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
@@ -546,6 +561,83 @@ class App(Adw.Application):
             return
         self._start_proc()
 
+    def on_mic_start_stop(self, _):
+        """Audio-only session. Independent of the camera: the phone camera is
+        a single shared resource, so this uses --no-video and never asks for
+        it. Requires no v4l2 device."""
+        if self.audio_proc and self.audio_proc.poll() is None:
+            self._stop_audio_proc()
+            return
+        self._start_audio_proc()
+
+    def _start_audio_proc(self):
+        from . import backend as _b
+        if not self.cfg.get("mic_to_host", True) and not self.cfg.get("mic_to_phone", False):
+            self.toast("Both mic directions are off — nothing to start")
+            return
+        # Only ONE scrcpy audio source may exist: scrcpy registers its
+        # PipeWire source under the bare name "scrcpy", so a second instance
+        # collides with the first (observed as duplicate nodes). Stop any
+        # previous audio session - video may keep running, the camera is
+        # untouched either way.
+        self._stop_audio_proc()
+        argv = _b.build_audio_argv(self.cfg)
+        use_null_sink = bool(self.cfg.get("mic_to_host", True)) and not bool(self.cfg.get("mic_to_phone", False))
+        if use_null_sink:
+            _b.ensure_null_sink()
+        try:
+            subprocess.run(["adb","connect",f"{self.cfg['android_ip']}:{self.cfg['android_port']}"],
+                           capture_output=True, text=True, timeout=5)
+        except Exception as e:
+            logging.warning("pre-start adb connect: %s", e)
+        try:
+            self.audio_proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, start_new_session=True,
+            )
+        except FileNotFoundError:
+            self.toast("scrcpy not found — pacman -S scrcpy"); return
+        except Exception as e:
+            logging.exception("audio launch failed: %s", e)
+            self.toast(f"Mic launch failed: {e}")
+            return
+        logging.info("audio-only scrcpy launched, pid=%s argv=%s", self.audio_proc.pid, " ".join(argv))
+        self.refresh_status()
+        if self.cfg.get("mic_to_host", True) and self.cfg.get("mic_default", True):
+            def _mic_default():
+                time.sleep(2)  # wait for scrcpy to register PipeWire source
+                try:
+                    prev = _b.set_phone_as_system_mic(self.cfg)
+                    if prev.get("set"):
+                        self.cfg["_mic_prev"] = prev
+                        try: self.persist()
+                        except Exception: pass
+                        state = "muted" if self.cfg.get("mic_mute") else "live"
+                        GLib.idle_add(self._append_log,
+                                      f"[mic] scrcpy is system default mic ({state})\n")
+                    else:
+                        logging.info("mic promotion skipped (scrcpy not ready or guard)")
+                except Exception as e:
+                    logging.warning("mic default promotion failed: %s", e)
+            threading.Thread(target=_mic_default, daemon=True, name="mic-default").start()
+
+    def _stop_audio_proc(self):
+        """Stop ONLY the audio session. The camera keeps streaming."""
+        p = self.audio_proc
+        self.audio_proc = None
+        if p and p.poll() is None:
+            try:
+                p.terminate(); p.wait(timeout=4)
+            except Exception:
+                try: p.kill()
+                except Exception: pass
+        from . import backend as _b
+        try:
+            self._restore_mic()
+        except Exception as e:
+            logging.warning("mic restore failed: %s", e)
+        self.refresh_status()
+
     def _start_proc(self):
         from . import backend as _b
         # Kill any stale scrcpy camera (previous IP, crash, or manual test)
@@ -609,7 +701,10 @@ class App(Adw.Application):
         # mic: promote scrcpy to system default source (so all apps pick it up)
         # and apply mute flag (echo protection).  Restore previous default on stop.
         # Guard: only auto-promote if mic_default is on; fixes sticky scrcpy loop.
-        if self.cfg.get("mic_to_host", True) and self.cfg.get("mic_default", True):
+        # This path is the COMBINED session. An audio-only session promotes the
+        # mic in _start_audio_proc instead; doing it here as well would make
+        # two threads race for the same PipeWire default.
+        if self.audio_proc is None and self.cfg.get("mic_to_host", True) and self.cfg.get("mic_default", True):
             def _mic_default():
                 time.sleep(2)  # wait for scrcpy to register PipeWire source
                 try:
@@ -635,6 +730,18 @@ class App(Adw.Application):
         self.toast(f"Started {self.cfg['camera_facing']} {self.cfg.get('custom_size') or SIZES[self.cfg['resolution']]} → {self.cfg['v4l2_sink']}")
         logging.info("scrcpy launched, pid=%s argv=%s", self.proc.pid, " ".join(argv))
 
+    def refresh_status(self):
+        """Reflect the two independent sessions in the mic button. Idempotent:
+        both start and stop paths call it, and it must never raise."""
+        try:
+            if self.audio_btn is None:
+                return
+            running = bool(self.audio_proc and self.audio_proc.poll() is None)
+            self.audio_btn.set_label("Stop mic" if running
+                                     else "Start mic only (no webcam)")
+        except Exception as e:
+            logging.warning("refresh_status failed: %s", e)
+
     def _append_log(self, line: str):
         """GLib-safe log append — catches every exception so the GUI never dies
         from a log-buffer error."""
@@ -654,9 +761,11 @@ class App(Adw.Application):
             self._start_proc()
         self._rotator = rotation.start_rotator(restart, self.cfg, window_class="scrcpy", interval=2.0)
 
-    def _stop_proc(self):
-        if not (self.proc and self.proc.poll() is None): return
-        # restore previous system default mic before tearing down scrcpy
+    def _restore_mic(self):
+        """Put the system default source back. Shared by both stop paths:
+        whichever session promoted the mic must undo it, and if the other
+        session is still running the promotion is still ours to undo because
+        the source it created is the one we pointed the system at."""
         from . import backend as _b
         prev = self.cfg.get("_mic_prev")
         if prev:
@@ -673,6 +782,11 @@ class App(Adw.Application):
                 if "scrcpy" in cur:
                     _b.restore_system_audio({})
             except Exception: pass
+
+    def _stop_proc(self):
+        if not (self.proc and self.proc.poll() is None): return
+        # restore previous system default mic before tearing down scrcpy
+        self._restore_mic()
         try: self.proc.terminate()
         except Exception: pass
         try: self.proc.wait(timeout=3)
@@ -684,6 +798,7 @@ class App(Adw.Application):
         self.start_btn.set_visible(True); self.stop_btn.set_visible(False)
         self.status_row.set_subtitle("Stopped — /dev/video0 free")
         self.status_icon.set_from_icon_name("camera-web-symbolic")
+        self.refresh_status()
 
     def on_proc_exit(self):
         if self.proc and self.proc.poll() is not None:

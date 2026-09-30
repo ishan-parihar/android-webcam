@@ -63,20 +63,12 @@ def ensure_v4l2loopback() -> bool:
     except Exception: pass
     return Path("/dev/video0").exists()
 
-def build_argv(cfg: dict, extra: list | None = None) -> list[str]:
-    """Compose scrcpy argv.
+def build_video_argv(cfg: dict, extra: list | None = None) -> list[str]:
+    """Video half of the scrcpy argv: phone camera -> host v4l2 device.
 
-    Audio model (two independent flags):
-      mic_to_host  (default ON)  -> --audio-source=mic  (to null sink, no echo)
-      mic_to_phone (default OFF) -> --audio-source=playback --audio-dup
-                                     (host audio -> phone speakers; use phone
-                                      as a remote speakerphone)
-      mic_mute     (default False) -> pactl set-source-mute on null monitor
-      mic_default  (default True)  -> pactl set-default-source null monitor
-
-    Phone mic is routed to a null sink (scrcpy_mic) via PULSE_SINK env in
-    start(), so it never hits HDMI speakers.  The null sink's monitor
-    (scrcpy_mic.monitor) becomes the system mic.
+    Split out of build_argv so the camera can run with no audio session at
+    all. Requires v4l2loopback: the caller must ensure /dev/video<N> exists
+    BEFORE starting this, and must not do so for an audio-only start.
     """
     tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
     size = cfg.get("custom_size") or SIZES.get(cfg.get("resolution","1080p"), "1920x1080")
@@ -94,21 +86,71 @@ def build_argv(cfg: dict, extra: list | None = None) -> list[str]:
     argv += [f"--v4l2-sink={cfg.get('v4l2_sink','/dev/video0')}", f"--v4l2-buffer={cfg.get('v4l2_buffer',120)}"]
     if cfg.get("video_bit_rate"): argv += [f"--video-bit-rate={cfg['video_bit_rate']}"]
     if not cfg.get("with_preview"): argv.append("--no-window")
+    if extra: argv += extra
+    return argv
 
+
+def build_audio_argv(cfg: dict, extra: list | None = None) -> list[str]:
+    """Audio half of the scrcpy argv, alone: --no-video, no camera touched.
+
+    --no-video is what makes an audio-only session possible; verified on
+    scrcpy 4.1, which accepts it and then streams mic without contending for
+    the camera. The camera is a single shared resource, so a video session
+    and an audio session must not both try to own it - this one never asks.
+
+    NOTE (name collision, observed): scrcpy registers its PipeWire source
+    under the bare name "scrcpy", so a second instance collides with the
+    first and the node list shows duplicates. Anything starting a second
+    audio session must therefore stop the first, or the capture target is
+    ambiguous.
+    """
+    tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
+    argv = ["scrcpy", f"--tcpip={tgt}", "--no-video"]
+    argv += audio_flags(cfg)
+    if extra: argv += extra
+    return argv
+
+
+def audio_flags(cfg: dict) -> list[str]:
+    """The four audio modes, unchanged from the original build_argv.
+
+      mic_to_host  (default ON)  -> --audio-source=mic  (to null sink, no echo)
+      mic_to_phone (default OFF) -> --audio-source=playback --audio-dup
+                                     (host audio -> phone speakers; use phone
+                                      as a remote speakerphone)
+      mic_mute     (default False) -> pactl set-source-mute on null monitor
+      mic_default  (default True)  -> pactl set-default-source null monitor
+    """
     mic_to_host = bool(cfg.get("mic_to_host", True))
     mic_to_phone = bool(cfg.get("mic_to_phone", False))
     if mic_to_host and not mic_to_phone:
         # Default: phone mic -> null sink (no echo), monitor becomes mic
-        argv += [f"--audio-source={cfg.get('audio_source','mic')}"]
-    elif mic_to_host and mic_to_phone:
-        argv += [f"--audio-source={cfg.get('audio_source','mic')}", "--audio-dup"]
-    elif not mic_to_host and mic_to_phone:
-        argv += ["--audio-source=playback", "--audio-dup"]
-    else:
-        argv.append("--no-audio")
+        return [f"--audio-source={cfg.get('audio_source','mic')}"]
+    if mic_to_host and mic_to_phone:
+        return [f"--audio-source={cfg.get('audio_source','mic')}", "--audio-dup"]
+    if not mic_to_host and mic_to_phone:
+        return ["--audio-source=playback", "--audio-dup"]
+    return ["--no-audio"]
 
-    if extra: argv += extra
-    return argv
+
+def build_argv(cfg: dict, extra: list | None = None) -> list[str]:
+    """Compose the full scrcpy argv: video and audio in ONE session.
+
+    Kept as the single-session entry point so existing callers are unchanged.
+    build_video_argv / build_audio_argv are the separable halves; this is
+    their union in the original order.
+
+    Phone mic is routed to a null sink (scrcpy_mic) via PULSE_SINK env in
+    start(), so it never hits HDMI speakers.  The null sink's monitor
+    (scrcpy_mic.monitor) becomes the system mic.
+    """
+    # extra is applied ONCE, at the very end, exactly as the original did.
+    # Passing it into build_video_argv instead would be wrong here: the audio
+    # half is appended after the video half, so anything the video half
+    # appended would land in the middle of the command. A 512-case argv
+    # matrix caught that immediately.
+    return build_video_argv(cfg) + audio_flags(cfg) + (extra or [])
+
 
 def apply_mic_mute(cfg: dict) -> bool:
     """After the scrcpy process registers the PipeWire/Pulse source for the
@@ -1043,57 +1085,6 @@ def ensure_connected(cfg: dict, deadline: float = 12.0) -> tuple[bool,str]:
         return (True, f"connected: {target(cfg)}")
     return (False, msg)
 
-
-def start(cfg: dict) -> subprocess.Popen:
-    """Start scrcpy with the given config. Returns the Popen."""
-    tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
-    # A stale IP is the most common failure and scrcpy reports it as an opaque
-    # stream error. Re-resolve first so the failure is ours, not scrcpy's.
-    ok, why = ensure_connected(cfg)
-    if not ok:
-        raise RuntimeError(f"phone not reachable ({why}) — run: android-webcam --discover")
-    tgt = f"{cfg['android_ip']}:{cfg['android_port']}"
-    argv = build_argv(cfg)
-    # Kill any stale scrcpy camera instances (IP hop, previous crash)
-    try:
-        subprocess.run(["pkill","-f","scrcpy.*camera.*v4l2-sink"], capture_output=True, timeout=3)
-        time.sleep(0.5)
-    except Exception: pass
-    if not ensure_v4l2loopback():
-        raise RuntimeError("/dev/video0 missing — v4l2loopback not loaded. Reinstall v4l2loopback-dkms and modprobe.")
-    mic_to_host = bool(cfg.get("mic_to_host", True))
-    mic_to_phone = bool(cfg.get("mic_to_phone", False))
-    use_null_sink = mic_to_host and not mic_to_phone
-    if use_null_sink:
-        ensure_null_sink()
-    try:
-        subprocess.run(["adb","connect",tgt], capture_output=True, text=True, timeout=5)
-    except Exception: pass
-    if cfg.get("stay_brightness_low"):
-        try:
-            subprocess.run(["adb","-s",tgt,"shell",
-                            "settings put system screen_brightness_mode 0; settings put system screen_brightness 1; cmd display set-brightness 0.001"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-        except Exception: pass
-    # Route via _move_scrcpy_to_null_sink after launch instead of PULSE_SINK
-    # env. PULSE_SINK pollutes WirePlumber's default-nodes (sink.0=scrcpy_mic)
-    # and makes the null sink appear as a permanent output choice, conflicting
-    # with the real HDMI (SAMSUNG) sink. Moving the stream after it appears
-    # is sufficient and leaves no sticky default.
-    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    if cfg.get("mic_to_host", True) and cfg.get("mic_default", True):
-        def _delay_default():
-            prev = set_phone_as_system_mic(cfg)
-            cfg["_mic_prev"] = prev
-        threading_mod = __import__("threading")
-        threading_mod.Thread(target=_delay_default, daemon=True).start()
-    elif cfg.get("mic_to_host", True) and cfg.get("mic_mute", True):
-        def _delay_mute():
-            time.sleep(2)
-            apply_mic_mute(cfg)
-        threading_mod = __import__("threading")
-        threading_mod.Thread(target=_delay_mute, daemon=True).start()
-    return p
 
 def cli():
     """android-webcam-cli — headless for scripts/Hyprland binds."""
