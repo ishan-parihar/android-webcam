@@ -147,8 +147,8 @@ Remove `/etc/modules-load.d/v4l2loopback.conf` and
 
 | Symptom | Cause / fix |
 |---|---|
-| `/dev/video0` missing | `lsmod \| grep v4l2loopback`; the module needs a reboot after `linux-headers` |
-| `Cannot open video device` | re-login after `usermod -aG video`, then `id -nG \| grep video`. Note `install.sh` permissions on `/dev/video0` do **not** survive a reboot; to make them persistent write `KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", GROUP="video", MODE="0660"` to `/etc/udev/rules.d/99-android-webcam.rules` and run `sudo udevadm control --reload && sudo udevadm trigger` |
+| `/dev/video0` missing | `lsmod \ |
+| `Cannot open video device` | re-login after `usermod -aG video`, then `id -nG \ |
 | No device on port 5555 | adb-over-Wi-Fi is off, or you moved networks; `adb connect <phone-ip>:5555` |
 | Torch does nothing | some cameras expose torch only with root, and not while scrcpy holds the camera |
 | Mic silent | the phone mic is forwarded **muted by default**; see `--mic-mute-off` and the echo warning below |
