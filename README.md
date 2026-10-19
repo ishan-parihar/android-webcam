@@ -182,6 +182,8 @@ because that is where `omarchy plugin add` looks: it clones the repo and reads
 the top-level manifest. There is exactly one copy of each, so the bar widget and
 the panel cannot drift apart.
 
+Every doc in `docs/` is listed with the question it answers in [docs/PAGE-INDEX.md](docs/PAGE-INDEX.md).
+
 ## License
 
 MIT — see [LICENSE](./LICENSE). Depends on scrcpy (GPLv2), v4l2loopback (GPLv2),
