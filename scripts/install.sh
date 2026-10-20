@@ -13,7 +13,11 @@ echo "== android-webcam install =="
 echo "   Root: $ROOT"
 echo "   User: $USER  Kernel: $(uname -r)  Arch: $(uname -m)"
 
-# ── 0. Preflight: must be Arch with pacman ──────────────────────────
+# ── 0. Preflight: must be Linux, and Arch with pacman ───────────────
+case "$(uname -s)" in
+  Linux) ;;
+  *) fail "android-webcam: Linux only; got $(uname -s)"; exit 1 ;;
+esac
 if ! command -v pacman >/dev/null 2>&1; then
   fail "pacman not found — this installer targets Arch / Omarchy / CachyOS"
   echo "  On other distros install manually: scrcpy, android-tools, v4l2loopback, ffmpeg, gtk4, libadwaita, then pip install -e ."
