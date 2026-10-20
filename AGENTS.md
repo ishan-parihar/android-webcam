@@ -11,8 +11,13 @@ android-webcam streams an Android phone's camera to a Linux desktop over adb, us
 ## Gate
 
 ```
-pytest
+./scripts/run-tests.sh
 ```
+
+Not `pytest`: most of the tests here are standalone scripts that call
+`sys.exit()` at the end, so pytest's collector imports the module, the module
+exits, and pytest reports an INTERNALERROR rather than a result. The runner
+does both kinds the way each was written to be run.
 
 ## Routing table — which document answers what
 

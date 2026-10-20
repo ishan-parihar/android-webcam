@@ -1,0 +1,26 @@
+# Android Webcam — persistent permissions for the v4l2loopback device.
+#
+# v4l2loopback creates /dev/video0 as root:video, mode 0600. The install
+# script fixes that ONCE with chgrp/chmod, which does not survive a reboot:
+# udev recreates the node with the default permissions, and the webcam then
+# disappears from every app that opens a camera.
+#
+# This rule is the persistent half. It is a MANUAL step on purpose — the
+# install script does not write it, because writing to /etc/udev/rules.d is a
+# system change the user should make knowingly, and the script's own job is
+# to make the device work right now.
+#
+# To install it:
+#
+#   sudo cp udev/rules.d/99-android-webcam.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --action=add --subsystem-match=video4linux
+#
+# After that, /dev/video0 is video:video 0660 on every boot, and every
+# application that opens a camera — Zoom, OBS, browsers, ffmpeg — finds it.
+#
+# The v4l2loopback module itself is a separate step and is not covered here:
+#
+#   echo v4l2loopback | sudo tee /etc/modules-load.d/v4l2loopback.conf
+
+KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", ATTRS{card_label}=="Android Webcam", MODE="0660", GROUP="video"

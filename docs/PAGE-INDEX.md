@@ -13,3 +13,5 @@ Status: LIVE (current truth) · EVIDENCE (dated measured verdict) · PLAN-ACTIVE
 | [`WORKLOG.md`](kb/WORKLOG.md) | LEDGER | Worklog | — |
 | [`feed.md`](kb/feed.md) | LEDGER | Agent feed | — |
 | [`RECORDS.md`](RECORDS.md) | LIVE | Records — decisions (AD) and regressions (RG) — Generated zones below are written by genome rec emit; never hand-edit them. Topic → governing record… | — |
+| [`companion-protocol.md`](companion-protocol.md) | LIVE | Companion protocol v2 — the JSON-lines contract the Android companion app and this host's backend both implement; the transport, the session lifecycle and the failure contract. | — |
+| [`INTEGRATION.md`](INTEGRATION.md) | EVIDENCE | Integration record — the two repos that were one project: which survived, what the suite had that the webcam did not, and the three defects the integration exposed. | — |

@@ -52,6 +52,12 @@ DEFAULTS = {
     # KeyError on it, and the mic-restore call site swallows exceptions, so
     # the breakage would show up only as a mic that never comes back.
     "_mic_prev": None,
+
+    # Companion app (android-companion/) integration. companion_host_port is
+    # the host-side adb forward port; see docs/companion-protocol.md. The
+    # companion is OPTIONAL - the scrcpy path needs none of this.
+    "companion_host_port": 7878,
+    "companion_keepalive": True,   # ask the phone to hold a wake lock while streaming
 }
 
 SIZES = {"720p": "1280x720", "1080p": "1920x1080"}

@@ -21,10 +21,40 @@ scrcpy 4.1 (host) --decode--> v4l2loopback --> /dev/video0   (webcam)
                            \--> PipeWire null sink --> default source (mic)
 ```
 
-There is no APK in the video path. The only thing streaming the camera is
-scrcpy's own server, pushed over `adb` at launch. An optional companion app
-(`android/`) exists only to capture device-side logs to `aw.log`, which
-`android-webcam --phone-log` can then pull; the webcam works without it.
+**There is no APK in this path.** The only thing streaming the camera is
+scrcpy's own server, pushed over `adb` at launch. That is the whole design:
+one APK-free path that works on any rooted phone with `adb` enabled, and
+nothing on the device that the user has to install, trust, or keep updated.
+
+### The two phone apps, and which one you need
+
+This repo holds **two** Android apps, and they do different jobs. Only one of
+them is in the camera path above.
+
+| App | What it is | In the camera path? |
+|---|---|---|
+| `android/` | A small Java app that captures device-side logs to `aw.log`, which `android-webcam --phone-log` pulls. It also advertises the phone over mDNS so the host can find it. | **No** - the webcam works without it. It is a diagnostic. |
+| `android-companion/` | A Kotlin app that serves the phone's camera over a JSON-lines protocol on an `adb forward` - a second, newer path that does not need scrcpy's video server. | **Optional** - see below. |
+
+The companion app speaks the contract in
+[`docs/companion-protocol.md`](docs/companion-protocol.md), and this host's
+backend implements the same document. It exists because scrcpy's camera
+path has limits: it is scrcpy's screen-mirroring server asked for a
+different video source. A purpose-built app can do the camera properly, and
+can hold a wake lock for as long as the stream is live instead of for as long
+as scrcpy is running.
+
+The companion is **off by default and entirely optional**. The scrcpy path
+above is the supported one; the companion is the newer one, and the two are
+independent - a missing companion never affects the webcam.
+
+To talk to it once it is installed and the phone is connected:
+
+```bash
+android-webcam --companion-status     # the phone's own view of itself
+android-webcam --companion-cameras    # what cameras it can offer
+android-webcam --status                # the machine-readable contract the panel reads
+```
 
 ## Requirements
 
@@ -50,11 +80,24 @@ echo 'options v4l2loopback card_label="Android Webcam" exclusive_caps=0 video_nr
 # 3. this project
 git clone https://github.com/ishan-parihar/android-webcam.git
 cd android-webcam && ./scripts/install.sh
+
+# 4. persistent /dev/video0 permissions (a manual step, see below)
+sudo cp udev/rules.d/99-android-webcam.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger --action=add --subsystem-match=video4linux
 ```
 
 `install.sh` installs the `android-webcam` command, loads `v4l2loopback`, adds
 your user to `video`/`adbusers`, grants group access to `/dev/video0`, and copies
 the Omarchy plugin to `~/.config/omarchy/plugins/ishanp.android-webcam`.
+
+**Step 4 is separate on purpose.** `install.sh` fixes `/dev/video0`'s
+permissions once, with chgrp and chmod. That does not survive a reboot: udev
+recreates the node with the default permissions and the webcam silently
+disappears from every app that opens a camera. The rule in
+`udev/rules.d/99-android-webcam.rules` is the persistent half, and copying it
+is a system change the user makes knowingly rather than one the script makes
+for them.
 
 ### Omarchy shell integration
 
@@ -91,6 +134,20 @@ One-time, on the phone:
 
 The host discovers the phone and hands over its own adb key on first run — you do
 not copy keys by hand.
+
+### If you want the companion path instead
+
+The companion app is a separate APK, built from `android-companion/`:
+
+```bash
+cd android-companion && ./gradlew assembleDebug
+# the APK lands in app/build/outputs/apk/debug/
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+The phone app and this host's backend implement the same document,
+[`docs/companion-protocol.md`](docs/companion-protocol.md). It is optional:
+the scrcpy path above is the supported one and needs no APK.
 
 ## Usage
 
@@ -172,8 +229,11 @@ Layout:
 
 ```
 src/android_webcam/     app.py (CLI + GTK), backend.py (scrcpy, adb, audio), config.py
+                        companion.py  the client for the companion app (optional path)
 Panel.qml BarWidget.qml manifest.json   the Omarchy plugin - these ARE the plugin
-android/                the companion app: optional log capture to aw.log on the phone
+android/                the log-capture app: optional, writes aw.log on the phone
+android-companion/      the companion app: optional, serves the camera over adb forward
+udev/rules.d/           the persistent /dev/video0 permission rule
 tests/                  one file per behaviour
 ```
 

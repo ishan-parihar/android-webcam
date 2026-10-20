@@ -4,6 +4,7 @@ import Quickshell.Io
 import qs.Ui
 import qs.Commons
 
+import qs.Commons as Commons
 Panel {
   id: root
   moduleName: "ishanp.android-webcam"
@@ -174,7 +175,7 @@ Panel {
         checked: root.truthy("torch")
         hasCursor: true
         foreground: root.foreground
-        accent: Color.accent
+        accent: Commons.Color.accent
         fontFamily: root.fontFamily
         onClicked: root.apply("torch", !root.truthy("torch") ? "on" : "off")
       }
@@ -185,7 +186,7 @@ Panel {
         checked: root.truthy("mic_to_host")
         hasCursor: true
         foreground: root.foreground
-        accent: Color.accent
+        accent: Commons.Color.accent
         fontFamily: root.fontFamily
         onClicked: root.apply("mic_to_host", !root.truthy("mic_to_host") ? "on" : "off")
       }
@@ -196,7 +197,7 @@ Panel {
         checked: root.truthy("with_preview")
         hasCursor: true
         foreground: root.foreground
-        accent: Color.accent
+        accent: Commons.Color.accent
         fontFamily: root.fontFamily
         onClicked: root.apply("with_preview", !root.truthy("with_preview") ? "on" : "off")
       }
@@ -215,7 +216,7 @@ Panel {
           options: ["back", "front"]
           value: root.value("camera_facing", "back")
           foreground: root.foreground
-          accent: Color.accent
+          accent: Commons.Color.accent
           fontFamily: root.fontFamily
           // `changed(string value)`, not `selected` - ButtonGroup has no
           // `selected` signal, and QML ignores a handler for a signal that
@@ -236,7 +237,7 @@ Panel {
           options: ["720p", "1080p"]
           value: root.value("resolution", "1080p")
           foreground: root.foreground
-          accent: Color.accent
+          accent: Commons.Color.accent
           fontFamily: root.fontFamily
           onChanged: function(v) { root.apply("resolution", v) }
         }

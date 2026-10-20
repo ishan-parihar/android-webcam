@@ -2,6 +2,10 @@
 import subprocess, shlex, shutil, time, json, os, logging, sys, threading
 from pathlib import Path
 from .config import SIZES, load, target, update
+# The companion app is OPTIONAL: the scrcpy path needs nothing from the phone
+# beyond adb. Imported here so the status contract can talk about it, and so
+# a missing companion never breaks the import of this module.
+from . import companion as _companion
 
 def scrcpy_exists() -> bool: return shutil.which("scrcpy") is not None
 def adb_exists() -> bool: return shutil.which("adb") is not None
@@ -260,6 +264,16 @@ def scrcpy_camera_pids(proc_root: Path | None = None) -> list[int]:
 def scrcpy_is_camera(proc_root: Path | None = None) -> bool:
     """True when a scrcpy process is running the WEBCAM, not the screen mirror."""
     return bool(scrcpy_camera_pids(proc_root))
+
+
+def pgrep_streaming() -> bool:
+    """True when the camera stream is running.
+
+    One name for the question the CLI, the bar widget, the panel and the
+    status contract all ask, so they cannot drift into disagreeing about
+    whether the webcam is live.
+    """
+    return scrcpy_is_camera()
 
 
 def stop_camera_stream(proc_root: Path | None = None) -> int:
@@ -536,6 +550,53 @@ def _adb_shell_echo(ip: str, port: int, timeout: float = 4.0) -> bool:
 
 
 import re as _re
+
+def _mdns_ports() -> list[tuple[str,int]]:
+    """The (ip, port) pairs the host's mDNS discovery currently sees.
+
+    A thin wrapper over the endpoint discovery, kept as its own name because
+    the advertisement check compares the HOST's findings against the PHONE's
+    own report, and that comparison is only meaningful if both sides are
+    looking at the same thing.
+    """
+    return _known_adb_endpoints()
+
+
+def _print_advertisement_check(to_stderr: bool = False, sweep="default"):
+    """Print the host-vs-phone verdict on the companion's mDNS findings.
+
+    `to_stderr` matters where stdout is a machine-readable contract: a human
+    verdict on stdout would corrupt it for every parser.
+
+    `sweep` is a list of (ip, port) the host's discovery saw. "default" means
+    "run the sweep" — the default, because this is the human-facing verdict
+    and the ~1s avahi subprocess is worth it there. None means "no sweep was
+    taken", which is a THIRD state, distinct from a sweep that ran and found
+    nothing: claiming either agreement or a parser failure without having
+    asked would be invented.
+    """
+    from . import companion as _companion
+    if sweep == "default":
+        sweep = _mdns_ports()
+    # check_advertisement takes the sweep as a CALLABLE, not a list: it decides
+    # whether to sweep at all, and a list would have been taken by then.
+    # None here means "not swept" — the third state, not an empty result.
+    chk = _companion.check_advertisement(
+        sweep=(lambda: sweep) if sweep is not None else None)
+    stream = sys.stderr if to_stderr else sys.stdout
+    if not chk["checked"]:
+        print("  advertisement check: SKIPPED (phone unreachable or too old)", file=stream)
+    elif chk["agrees"] is True:
+        print(f"  advertisement check: \u2713 host mDNS agrees (port {chk['phone_port']})", file=stream)
+    elif chk["mismatch"]:
+        print(f"  advertisement check: \u2717 {chk['mismatch']}", file=stream)
+    else:
+        # No verdict is not good news. Say why rather than printing nothing.
+        print("  advertisement check: phone reports port "
+              f"{chk['phone_port']}, host mDNS not swept "
+              "(run the sweep for the comparison)", file=stream)
+    return chk
+
 
 def _known_adb_endpoints() -> list[tuple[str,int]]:
     """(ip, port) pairs the phone may currently be serving adb on.
@@ -1226,6 +1287,15 @@ def cli():
                         "can fetch it (no hand-copying)")
     p.add_argument("--phone-log", action="store_true",
                    help="print the phone app's discovery log, then exit")
+    p.add_argument("--status", action="store_true",
+                   help="print the phone's status as JSON (companion app), then exit")
+    p.add_argument("--companion-status", action="store_true",
+                   help="ask the phone's companion app for its status, then exit "
+                        "(needs the companion app installed and adb forward up)")
+    p.add_argument("--companion-cameras", action="store_true",
+                   help="list the cameras the phone's companion app reports, then exit")
+    p.add_argument("--companion-ping", action="store_true",
+                   help="ping the phone's companion app over adb forward, then exit")
     p.add_argument("--set-ip", help="Set phone IP and save to config")
     p.add_argument("--no-rotate", action="store_true", help="disable auto-rotate")
     a = p.parse_args()
@@ -1262,6 +1332,60 @@ def cli():
                 print(f"  ({p}: {e})", file=sys.stderr)
         else:
             print("no phone log found; on the phone, tap 'Copy diagnostics' instead")
+        return
+    if a.status:
+        # `--status` is machine-readable by contract, so the human verdict
+        # belongs IN the JSON for the panel and to STDERR for a person.
+        # stdout stays pure JSON; prose there would break every consumer.
+        #
+        # The live avahi sweep is NOT run here: it is a ~1s subprocess and
+        # `--status` is polled repeatedly. A human who wants the full verdict
+        # runs the sweep explicitly; a poll gets the phone-side facts, which
+        # cost nothing, and no host-side guess.
+        #
+        # No separate adb_mdns_checked key: a hardcoded True would contradict
+        # advertisement_check["checked"] whenever the phone is unreachable or
+        # too old, and nothing on screen would catch the lie. The nested
+        # `checked` flag already reports the truth.
+        summary = _companion.sync(cfg, apply=False)
+        if not summary.get("reachable"):
+            print(json.dumps({"reachable": False, "reason": summary.get("reason"),
+                              "notes": summary.get("notes", []),
+                              "port": summary.get("port")}))
+            raise SystemExit(1)
+        st = dict(summary["status"])
+        st["reachable"] = True
+        st["streaming"] = bool(pgrep_streaming())
+        st["advertisement_check"] = _companion.check_advertisement(sweep=None)
+        # The QML panel reads this JSON, so the negotiated port and any
+        # non-fatal warnings have to travel with it.
+        st["notes"] = summary.get("notes", [])
+        st["port"] = summary.get("port")
+        print(json.dumps(st, default=str))
+        _print_advertisement_check(to_stderr=True, sweep=None)
+        return
+    if a.companion_status or a.companion_cameras or a.companion_ping:
+        # The companion app is a separate APK (android-companion/) that serves
+        # camera frames over a JSON-lines protocol on an adb forward. It is
+        # OPTIONAL: the scrcpy path above needs nothing from the phone beyond
+        # adb, and this is the newer path that replaces it.
+        #
+        # Every failure is loud: a companion that is absent, not rooted, or
+        # mid-setup must not look like a companion that is healthy.
+        tgt = f"{cfg.get('android_ip','')}:{cfg.get('android_port',5555)}"
+        try:
+            if a.companion_ping:
+                out = _companion.ping()
+            elif a.companion_cameras:
+                out = {"cameras": _companion.cameras()}
+            else:
+                out = _companion.status()
+        except _companion.CompanionError as e:
+            print(f"companion unreachable: {e}", file=sys.stderr)
+            print("install the companion app on the phone, or check the adb forward",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        print(json.dumps(out, indent=2, default=str))
         return
     if a.serve:
         serve_key()

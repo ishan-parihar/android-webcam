@@ -21,7 +21,11 @@ feed = "docs/kb/feed.md"
 workflows = "docs/kb/workflows"
 
 [core]
-gate = "pytest"
+gate = "./scripts/run-tests.sh"
+# NOT `pytest`: most of these tests are standalone scripts that call
+# sys.exit() at the end, so pytest's collector imports the module, the
+# module exits, and pytest reports an INTERNALERROR instead of a result.
+# The runner does both kinds the way each was written to be run.
 worklog_form = "file"      # or "numbered" (worklog = a directory of NNNN-date-slug.md + INDEX.md)
 archive_form = "flat"      # or "generations" (archive/<generation>/ + README manifest, no tombstones)
 living_plans = []          # plans that evolve (phase rows, a 'Resume here' section)

@@ -4,11 +4,12 @@ import Quickshell.Io
 import qs.Ui
 import qs.Commons
 
+import qs.Commons as Commons
 Panel {
   id: root
   moduleName: "ishanp.android-webcam"
   ipcTarget: "ishanp.android-webcam"
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -109,8 +110,8 @@ Panel {
           Text { text: "󰄀  Open GUI"; color: root.foreground; font.family: root.fontFamily; font.bold: true; anchors.centerIn: parent }
           MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: launchProc.running = true }
         }
-        Rectangle { width: (parent.width-8)/2; height: 36; radius: Style.cornerRadius; color: root.streaming ? Util.alpha(Color.accent,0.18) : Util.alpha(root.foreground,0.06); border.width: 1; border.color: Util.alpha(root.foreground,0.12)
-          Text { text: root.streaming ? "■  Stop" : "▶  Quick Start (back 720p)"; color: root.streaming ? Color.accent : root.foreground; font.family: root.fontFamily; font.bold: true; anchors.centerIn: parent; elide: Text.ElideRight; width: parent.width-12; horizontalAlignment: Text.AlignHCenter }
+        Rectangle { width: (parent.width-8)/2; height: 36; radius: Style.cornerRadius; color: root.streaming ? Util.alpha(Commons.Color.accent,0.18) : Util.alpha(root.foreground,0.06); border.width: 1; border.color: Util.alpha(root.foreground,0.12)
+          Text { text: root.streaming ? "■  Stop" : "▶  Quick Start (back 720p)"; color: root.streaming ? Commons.Color.accent : root.foreground; font.family: root.fontFamily; font.bold: true; anchors.centerIn: parent; elide: Text.ElideRight; width: parent.width-12; horizontalAlignment: Text.AlignHCenter }
           MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
             if (root.streaming) stopProc.running = true
                 else { presetProc.args = ["camera_facing", "back", "resolution", "720p"]
