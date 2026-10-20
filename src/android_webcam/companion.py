@@ -1,6 +1,6 @@
 """Android Webcam Companion client — adb forward + JSON-lines protocol.
 
-The companion app (android-app/, phone) serves a LocalServerSocket on the
+The companion app (android-companion/, phone) serves a LocalServerSocket on the
 abstract name "android-webcam-companion".  The host reaches it through an adb
 forward, so the protocol works identically over USB and over `adb tcpip 5555`
 with no pairing, no wifi, and no permissions on either side.

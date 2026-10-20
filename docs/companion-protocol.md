@@ -1,7 +1,7 @@
 # Companion protocol v2 — JSON lines over adb forward
 
-Single contract shared by the Android companion app (`android-app/`) and the
-desktop backend (`desktop/src/android_webcam/companion.py`). Both sides
+Single contract shared by the Android companion app (`android-companion/`) and the
+desktop backend (`src/android_webcam/companion.py`). Both sides
 implement exactly this document; no schema forks. v1 commands are unchanged;
 v2 adds the session lifecycle that makes screen-off keep-alive leak-free.
 

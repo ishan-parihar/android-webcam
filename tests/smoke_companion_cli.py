@@ -4,7 +4,7 @@
 Stands up a fake companion on a loopback socket, points the desktop client at
 it (no adb: the adb forward is stubbed exactly as Session does under test),
 and exercises `status` + `cameras` + `config.set` the way the CLI would.
-Mock-only.  Run:  python desktop/tests/smoke_companion_cli.py
+Mock-only.  Run:  python tests/smoke_companion_cli.py
 """
 import json
 import os

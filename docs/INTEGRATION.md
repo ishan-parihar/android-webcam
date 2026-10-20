@@ -18,10 +18,10 @@ that had, by then, reversed.
 | | `android-webcam` | `android-webcam-suite` |
 |---|---|---|
 | product code last touched | 2026-10-01 | 2026-09-27 |
-| commits | 114 | 48 |
+| commits | 114 | 48 (at the split; 50 by retirement) |
 | `Panel.qml` | 257 lines | 65 lines |
 | `setsid -f` detach | present | absent |
-| remote | `ishan-parihar/android-webcam` | none — 48 commits local only |
+| remote | `ishan-parihar/android-webcam` | `ishan-parihar/android-webcam-suite` (tombstone) |
 
 ## Which one survived, and why
 
@@ -88,5 +88,7 @@ README says so.
 ## What this repo is now
 
 One repository, one project, one plugin. `android-webcam-suite` is retired:
-its history and its remote-free 48 commits are preserved here, and the
-repository is kept as a tombstone rather than deleted.
+its 50 commits live on GitHub as a tombstone
+(`ishan-parihar/android-webcam-suite`, `master` at `e06ef54`), and its
+directory was removed from the portfolio on 2026-10-20. The two are one
+project, and this repository is where that project lives.
